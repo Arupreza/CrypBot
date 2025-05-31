@@ -453,10 +453,17 @@ def analyze_strategies(df: pd.DataFrame, client: ExchangeClient,
             # ENTRY
             if strategy_msb.position is None:
                 if green_break:
-                    swing_high, swing_low = get_swing_levels(df, lookback=20)
                     atr_val = calculate_atr(df, period=14)
-                    stop_loss = swing_low - atr_val
+
+                    # Look ahead 20 candles to compute next swing low
+                    lookahead_window = 20
+                    df_forward = df.copy().shift(-1)
+                    future_swing_low = df_forward['low'].head(lookahead_window).min()
+
+                    stop_loss = future_swing_low - atr_val
                     if stop_loss < current_price:
+                        # TP still based on current swing high
+                        swing_high, _ = get_swing_levels(df, lookback=20)
                         strategy_msb.open_long(
                             client, symbol, usdt_size,
                             entry_price=current_price,
