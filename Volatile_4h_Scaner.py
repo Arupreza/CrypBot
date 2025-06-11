@@ -127,9 +127,9 @@ class BinanceVolatilityCalculator:
         return abs(drawdown.min())
     
     def get_top_volatile_coins_4h(self, top_n=25):
-        """Get top N volatile coins based on last 4 hours of 5-minute data"""
+        """Get top N volatile coins based on last 4 hours of 15-minute data"""
         
-        print(f"Fetching last 4 hours of 5-minute data for volatility calculation...")
+        print(f"Fetching last 4 hours of 15-minute data for volatility calculation...")
         print(f"Analysis time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Get all USDT pairs
@@ -149,7 +149,7 @@ class BinanceVolatilityCalculator:
                     print(f"Processed {processed}/{len(usdt_pairs)} pairs... ({(processed/len(usdt_pairs)*100):.1f}%)")
                     time.sleep(1)  # Brief pause to respect rate limits
                 
-                # Get last 4 hours of 5-minute data (48 intervals)
+                # Get last 4 hours of 15-minute data (48 intervals)
                 df = self.get_kline_data(symbol, interval='15m', limit=48)
                 
                 if df is not None and len(df) >= 10:  # Need at least 10 data points
