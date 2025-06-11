@@ -287,7 +287,7 @@ class CompleteBinanceUSDTPressureScanner:
         else:
             return "BUILDING"
         
-def get_binance_dataframe(min_volume_usdt=1000000, top_n=25):
+def get_binance_buy_presure(min_volume_usdt=1000000, top_n=25):
     """
     Simple function to get DataFrame only (1-hour timeframe)
     """
@@ -298,7 +298,7 @@ def get_binance_dataframe(min_volume_usdt=1000000, top_n=25):
 
 #########  Use of Function  #########
     """
-    binance_df = get_binance_dataframe(min_volume_usdt=1000000, top_n=50)
+    binance_df = get_binance_buy_presure(min_volume_usdt=1000000, top_n=50)
 binance_df_filtered = binance_df[(binance_df['current_buy_pressure'] > 
                                 binance_df['current_sell_pressure']) & 
                                 (binance_df['momentum'] != "BUILDING") & 

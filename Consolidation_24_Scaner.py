@@ -291,8 +291,8 @@ class ConsolidationAnalyzer:
         
         # Rename columns for display
         display_df.columns = [
-            'Rank', 'Symbol', 'Price', '24h Change', '24h Range', 
-            'Volatility', 'ATR %', '24h Volume', 'Vol Surge'
+            'rank', 'symbol', 'price', '24h_Change', '24h_Range', 
+            'volatility', 'ATR %', '24h_Volume', 'vol_Surge'
         ]
         
         return display_df
