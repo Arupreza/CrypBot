@@ -76,7 +76,7 @@ def display_gainers(gainers):
     # Prepare the data for DataFrame
     data = []
     for i, coin in enumerate(gainers, 1):
-        symbol = coin['symbol'].replace('USDT', '')
+        symbol = f"{coin['symbol'].replace('USDT', '')}USDT"  # Modify symbol format
         price = f"${coin['price']:.4f}" if coin['price'] < 1 else f"${coin['price']:.2f}"
         change_percent = f"+{coin['price_change_percent']:.2f}%"
         volume = f"{coin['volume']:,.0f}"
@@ -84,10 +84,10 @@ def display_gainers(gainers):
         data.append([i, symbol, price, change_percent, volume])
     
     # Create DataFrame
-    df = pd.DataFrame(data, columns=["Rank", "Symbol", "Price (USDT)", "Change %", "Volume"])
+    df = pd.DataFrame(data, columns=["rank", "symbol", "price (USDT)", "change %", "volume"])
     
     # Add a timestamp for the display
-    df['Timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     return df
 
