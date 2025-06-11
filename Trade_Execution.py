@@ -83,7 +83,7 @@ class BinanceTradingBot:
         except Exception as e:
             logger.error(f"Error saving trade to CSV: {e}")
 
-    def get_swing_points(self, symbol: str, timeframe: str = '15m', lookback: int = 50) -> Tuple[float, float]:
+    def get_swing_points(self, symbol: str, timeframe: str = '15m', lookback: int = 20) -> Tuple[float, float]:
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=lookback)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -358,7 +358,7 @@ class BinanceTradingBot:
                 'quantity': quantity,
                 'usdt_amount': usdt_amount,
                 'stop_loss': swing_low,
-                'take_profit': swing_high,
+                'take_profit': swing_high,  # Use dynamic swing_high as initial take_profit
                 'entry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
