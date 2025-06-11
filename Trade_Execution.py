@@ -224,32 +224,32 @@ class BinanceTradingBot:
             quantity = position['quantity']
             stop_moved_to_entry = False
             
-            # Initialize with the current candle's timestamp
+            # Initialize with latest candle's timestamp
             ohlcv = self.exchange.fetch_ohlcv(symbol, '15m', limit=1)
-            last_candle_time = ohlcv[-1][0] / 1000  # Convert ms to seconds
-            logger.info(f"Starting dynamic stop loss for {symbol} - Entry: {entry_price}, Stop: {current_stop}, Initial candle time: {datetime.fromtimestamp(last_candle_time)}")
+            last_candle_time = ohlcv[-1]['timestamp'] / 1000  # Convert ms to seconds
+            logger.info(f"Starting dynamic stop loss for {symbol} - Entry: {entry_price}, Stop: {current_stop}, Last candle time: {datetime.fromtimestamp(last_candle_time)}")
             
             while position in self.positions:
                 current_price = self.get_current_price(symbol)
                 if current_price is None:
-                    time.sleep(1)
+                    time.sleep(0.1)
                     continue
                 
                 # Fetch latest candle
                 ohlcv = self.exchange.fetch_ohlcv(symbol, '15m', limit=1)
                 latest_candle = ohlcv[-1]
-                candle_time = latest_candle[0] / 1000  # Convert ms to seconds
+                timestamp = latest_candle['timestamp'] / 1000  # Convert ms to seconds
                 
                 # Check if a new 15-minute candle has closed
-                if candle_time > last_candle_time and not stop_moved_to_entry:
-                    logger.info(f"New candle detected at {datetime.fromtimestamp(candle_time)}")
+                if timestamp > last_candle_time and not stop_moved_to_entry:
+                    logger.info(f"New candle detected at {datetime.fromtimestamp(timestamp)}")
                     if self.is_bullish_candle(symbol):
                         # Move stop loss to 0.2% below entry price
                         current_stop = entry_price * 0.998
                         stop_moved_to_entry = True
                         position['stop_loss'] = current_stop
-                        last_candle_time = candle_time
-                        logger.info(f"Stop loss moved to {current_stop} (0.2% below entry price) after bullish candle")
+                        last_candle_time = timestamp
+                        logger.info(f"Stop loss moved to: {current_stop} (0.2% below entry price) after bullish candle")
                 
                 # Check if stop loss is hit with a small buffer
                 if current_price <= current_stop * 1.002:  # Allow 0.2% buffer above stop loss
@@ -267,7 +267,7 @@ class BinanceTradingBot:
                     self.positions.remove(position)
                     break
                 
-                time.sleep(2)
+                time.sleep(0.1)
         except Exception as e:
             logger.error(f"Error in dynamic stop loss: {e}")
 
@@ -437,11 +437,12 @@ def main():
                         print(f"\nPosition Status: {base_currency}/USDT")
                         print(f"Entry Price: ${position['entry_price']:.2f}")
                         print(f"Current Price: ${current_price:.2f}")
+                        print(f"Current Stop Loss: ${position['stop_loss']:.2f}")
+                        print(f"Current Take Profit: ${position['take_profit']:.2f}")
                         print(f"PnL: ${pnl:.2f} ({pnl_percent:.2f}%)")
             time.sleep(10)
-    
     else:
         print("Trade execution failed")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
