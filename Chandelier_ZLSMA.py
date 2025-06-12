@@ -74,14 +74,14 @@ def calculate_zlsma(
     """
     Given a DataFrame `in_df` that has at least the `close_column`,
     this function:
-      1. Attempts to locate a timestamp column among common names.
-      2. If none is found, checks if the index is already a DatetimeIndex:
-         - If yes, uses the index as 'timestamp' quietly.
-         - If not, injects `df['timestamp'] = df.index` and prints a warning.
-      3. Computes a new column named `zlsma_{length}` via `zlsma(...)`.
-      4. Returns a DataFrame that includes all original columns plus:
-         - `'timestamp'`
-         - `f'zlsma_{length}'`.
+    1. Attempts to locate a timestamp column among common names.
+    2. If none is found, checks if the index is already a DatetimeIndex:
+        - If yes, uses the index as 'timestamp' quietly.
+        - If not, injects `df['timestamp'] = df.index` and prints a warning.
+    3. Computes a new column named `zlsma_{length}` via `zlsma(...)`.
+    4. Returns a DataFrame that includes all original columns plus:
+        - `'timestamp'`
+        - `f'zlsma_{length}'`.
     """
     df = in_df.copy()
 
@@ -145,13 +145,13 @@ def chandelier_exit(
 ) -> pd.DataFrame:
     """
     Given a DataFrame with at least 'high','low','close', this returns a copy of `df` with:
-      - 'atr'
-      - 'long_stop'
-      - 'short_stop'
-      - 'direction'
-      - 'chandelier_exit'
-      - 'buy_signal'
-      - 'sell_signal'
+    - 'atr'
+    - 'long_stop'
+    - 'short_stop'
+    - 'direction'
+    - 'chandelier_exit'
+    - 'buy_signal' (1 for entire duration while direction is long)
+    - 'sell_signal' (1 for entire duration while direction is short)
     """
     df_result = df.copy()
 
@@ -216,9 +216,11 @@ def chandelier_exit(
     df_result['direction']        = direction_array
     df_result['chandelier_exit']  = np.where(direction_array == 1, long_stop_array, short_stop_array)
 
-    # 4) Generate buy/sell signals (1 if flip occurs on that bar, else 0)
-    df_result['buy_signal']  = ((df_result['direction'] == 1)  & (df_result['direction'].shift() == -1)).astype(int)
-    df_result['sell_signal'] = ((df_result['direction'] == -1) & (df_result['direction'].shift() == 1 )).astype(int)
+    # 4) Generate persistent buy/sell signals based on current direction
+    # buy_signal = 1 when direction is 1 (long/green ribbon)
+    # sell_signal = 1 when direction is -1 (short/red ribbon)
+    df_result['buy_signal']  = (df_result['direction'] == 1).astype(int)
+    df_result['sell_signal'] = (df_result['direction'] == -1).astype(int)
 
     return df_result
 
@@ -233,14 +235,14 @@ def calculate_chandelier(
 ) -> pd.DataFrame:
     """
     Given a DataFrame `in_df` with at least ['high','low','close'], this function:
-      1. Attempts to detect a timestamp column among common names.
-      2. If none is found, checks if the index is a DatetimeIndex:
-         - If yes, uses index as 'timestamp' silently.
-         - If no, injects index as 'timestamp' with a warning.
-      3. Calls `chandelier_exit(...)` internally.
-      4. Returns a DataFrame with all original columns plus:
-         ['timestamp','atr','long_stop','short_stop','direction',
-          'chandelier_exit','buy_signal','sell_signal'].
+    1. Attempts to detect a timestamp column among common names.
+    2. If none is found, checks if the index is a DatetimeIndex:
+        - If yes, uses index as 'timestamp' silently.
+        - If no, injects index as 'timestamp' with a warning.
+    3. Calls `chandelier_exit(...)` internally.
+    4. Returns a DataFrame with all original columns plus:
+        ['timestamp','atr','long_stop','short_stop','direction',
+        'chandelier_exit','buy_signal','sell_signal'].
     """
     df = in_df.copy()
 
@@ -286,23 +288,62 @@ def merge_zlsma_chandelier(
     how: str = "inner"
 ) -> pd.DataFrame:
     """
-    Merge ZLSMA DataFrame with Chandelier exit DataFrame on 'timestamp'.
-    Expects both to contain a column named `on` (default: 'timestamp').
+    Simple merge of two DataFrames on timestamp column.
     """
-    cols_to_add = [
-        on,
-        "atr",
-        "long_stop",
-        "short_stop",
-        "direction",
-        "chandelier_exit",
-        "buy_signal",
-        "sell_signal",
-    ]
-
-    return pd.merge(
-        df_zlsma,
-        df_chandelier[cols_to_add],
+    # Clean up duplicate columns if they exist
+    df_zlsma_clean = df_zlsma.copy()
+    df_chandelier_clean = df_chandelier.copy()
+    
+    # Reset index to avoid ambiguity with timestamp, but drop if column already exists
+    if df_zlsma_clean.index.name == on or on in str(df_zlsma_clean.index.names):
+        if on in df_zlsma_clean.columns:
+            df_zlsma_clean = df_zlsma_clean.reset_index(drop=True)
+        else:
+            df_zlsma_clean = df_zlsma_clean.reset_index()
+    
+    if df_chandelier_clean.index.name == on or on in str(df_chandelier_clean.index.names):
+        if on in df_chandelier_clean.columns:
+            df_chandelier_clean = df_chandelier_clean.reset_index(drop=True)
+        else:
+            df_chandelier_clean = df_chandelier_clean.reset_index()
+    
+    # Remove duplicate columns (keep first occurrence)
+    if df_zlsma_clean.columns.duplicated().any():
+        df_zlsma_clean = df_zlsma_clean.loc[:, ~df_zlsma_clean.columns.duplicated()]
+    
+    if df_chandelier_clean.columns.duplicated().any():
+        df_chandelier_clean = df_chandelier_clean.loc[:, ~df_chandelier_clean.columns.duplicated()]
+    
+    # Debug: Print column info
+    print(f"ZLSMA columns: {list(df_zlsma_clean.columns)}")
+    print(f"Chandelier columns: {list(df_chandelier_clean.columns)}")
+    print(f"ZLSMA index: {df_zlsma_clean.index.name}")
+    print(f"Chandelier index: {df_chandelier_clean.index.name}")
+    
+    # Check if timestamp column exists in both DataFrames
+    if on not in df_zlsma_clean.columns:
+        raise ValueError(f"Column '{on}' not found in ZLSMA DataFrame. Available columns: {list(df_zlsma_clean.columns)}")
+    
+    if on not in df_chandelier_clean.columns:
+        raise ValueError(f"Column '{on}' not found in Chandelier DataFrame. Available columns: {list(df_chandelier_clean.columns)}")
+    
+    # Merge the DataFrames on timestamp
+    merged_df = pd.merge(
+        df_zlsma_clean,
+        df_chandelier_clean,
         on=on,
-        how=how
+        how=how,
+        suffixes=('', '_chandelier')  # Add suffix to duplicate columns from chandelier
     )
+    
+    return merged_df
+
+
+
+# Example usage
+"""
+df_zlsma = calculate_zlsma(df, close_column='close', length=200)
+df_chandelier = calculate_chandelier(df, atr_period=1, atr_multiplier=2.0)
+merged_chandelier_zlsma = merge_zlsma_chandelier(df_zlsma, df_chandelier)
+merged_chandelier_zlsma = merged_chandelier_zlsma[["timestamp", "close", "zlsma_200", "buy_signal", "sell_signal"]]
+"""
