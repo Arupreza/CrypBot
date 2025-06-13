@@ -33,7 +33,7 @@ class SimpleATRTradingBot:
         self.atr_period = 14
         self.max_stop_percent = 5.0
         self.min_stop_percent = 0.2
-        self.risk_reward_ratio = 2.0
+        self.risk_reward_ratio = 2.5
         self.candles_to_trail = 2
         
         # Active positions tracking
