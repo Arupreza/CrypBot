@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import time
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-class CompleteBinanceUSDTPressureScanner:
+class BinanceUSDTPressureScanner:
     def __init__(self):
         self.base_url = "https://api.binance.com/api/v3"
         self.session = requests.Session()
@@ -15,61 +14,6 @@ class CompleteBinanceUSDTPressureScanner:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         
-    def get_all_usdt_pairs(self):
-        """Get all active USDT trading pairs from Binance"""
-        endpoint = f"{self.base_url}/exchangeInfo"
-        
-        try:
-            response = self.session.get(endpoint)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Filter for USDT pairs that are actively trading
-            usdt_pairs = []
-            for symbol_info in data['symbols']:
-                if (symbol_info['symbol'].endswith('USDT') and 
-                    symbol_info['status'] == 'TRADING' and
-                    symbol_info['isSpotTradingAllowed']):
-                    usdt_pairs.append(symbol_info['symbol'])
-            
-            return usdt_pairs
-            
-        except requests.exceptions.RequestException as e:
-            return []
-    
-    def get_24hr_tickers(self):
-        """Get 24hr ticker data for all symbols"""
-        endpoint = f"{self.base_url}/ticker/24hr"
-        
-        try:
-            response = self.session.get(endpoint)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            return []
-    
-    def filter_high_volume_pairs(self, min_volume_usdt=100000):
-        """Filter USDT pairs by minimum 24h volume"""
-        tickers = self.get_24hr_tickers()
-        if not tickers:
-            return []
-        
-        high_volume_pairs = []
-        for ticker in tickers:
-            symbol = ticker['symbol']
-            if (symbol.endswith('USDT') and 
-                float(ticker['quoteVolume']) >= min_volume_usdt):
-                high_volume_pairs.append({
-                    'symbol': symbol,
-                    'volume': float(ticker['quoteVolume']),
-                    'price_change': float(ticker['priceChangePercent']),
-                    'last_price': float(ticker['lastPrice'])
-                })
-        
-        # Sort by volume descending
-        high_volume_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        return high_volume_pairs
-    
     def get_kline_data(self, symbol, interval='1h', limit=20):
         """Get 1-hour kline data for a symbol"""
         endpoint = f"{self.base_url}/klines"
@@ -166,24 +110,16 @@ class CompleteBinanceUSDTPressureScanner:
         
         return results
     
-    def get_dataframe(self, min_volume_usdt=500000, top_n=50):
-        """Return DataFrame with buy pressure data"""
+    def get_dataframe(self, symbols, top_n=50):
+        """Return DataFrame with buy pressure data for given symbols"""
         
-        # Step 1: Get high-volume USDT pairs
-        high_volume_pairs = self.filter_high_volume_pairs(min_volume_usdt)
-        if not high_volume_pairs:
-            return pd.DataFrame()
-        
-        # Limit to top 100 by volume to avoid too many API calls
-        symbols_to_scan = [pair['symbol'] for pair in high_volume_pairs[:100]]
-        
-        # Step 2: Calculate buy pressure for all symbols
-        pressure_data = self.scan_multiple_symbols(symbols_to_scan)
+        # Step 1: Calculate buy pressure for all input symbols
+        pressure_data = self.scan_multiple_symbols(symbols)
         
         if not pressure_data:
             return pd.DataFrame()
         
-        # Step 3: Create DataFrame
+        # Step 2: Create DataFrame
         df = pd.DataFrame(pressure_data)
         
         # Apply filters for quality coins (adjusted for 1-hour timeframe)
@@ -287,18 +223,22 @@ class CompleteBinanceUSDTPressureScanner:
         else:
             return "BUILDING"
         
-def get_binance_buy_presure(min_volume_usdt=1000000, top_n=25):
+def get_binance_buy_pressure(symbols, top_n=25):
     """
-    Simple function to get DataFrame only (1-hour timeframe)
+    Get buy pressure DataFrame for specified symbols (1-hour timeframe)
+    Args:
+        symbols (list): List of trading pair symbols (e.g., ['BTCUSDT', 'ETHUSDT'])
+        top_n (int): Number of top results to return
+    Returns:
+        pandas.DataFrame: Buy pressure analysis
     """
-    scanner = CompleteBinanceUSDTPressureScanner()
-    return scanner.get_dataframe(min_volume_usdt=min_volume_usdt, top_n=top_n)
-
+    scanner = BinanceUSDTPressureScanner()
+    return scanner.get_dataframe(symbols=symbols, top_n=top_n)
 
 
 #########  Use of Function  #########
     """
-    binance_df = get_binance_buy_presure(min_volume_usdt=1000000, top_n=50)
+binance_df = get_binance_buy_presure(min_volume_usdt=1000000, top_n=50)
 binance_df_filtered = binance_df[(binance_df['current_buy_pressure'] > 
                                 binance_df['current_sell_pressure']) & 
                                 (binance_df['momentum'] != "BUILDING") & 

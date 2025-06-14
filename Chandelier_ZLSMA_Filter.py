@@ -322,7 +322,7 @@ class BinanceChandelierScanner:
         stablecoins = [
             'GUSDUSDT', 'FRAXUSDT', 'USDDUSDT', 'MIMUSDT', 'LUSDUSDT', 'FEIUSDT', 'HUSDUSDT', 
             'SUSDUSDT', 'OUSDUSDT', 'USTCUSDT', 'VAIUSDT', 'DOLAUSDT', 'ALUSDUSDT', 'MUSDUSDT', 
-            'DUSDUSDT', 'CUSDUSDT', 'NUSDUSDT', 'ZUSDUSDT', 'EURUSDT'
+            'DUSDUSDT', 'CUSDUSDT', 'NUSDUSDT', 'ZUSDUSDT', 'EURUSDT', "USDPUSDT", 'TUSDUSDT', 'PAXUSDT', 'BUSDUSDT', 'DAIUSDT', 'USDNUSDT', 'USDKUSDT',
         ]
         try:
             markets = self.exchange.load_markets()
@@ -480,5 +480,33 @@ def main():
 if __name__ == "__main__":
     df_results = main()
     
+def chandelier_zlsma_filter(
+    timeframe: str = '15m',
+    scan_limit: int = 200,
+    max_buy_candles: int = 2,
+    zlsma_length: int = 200,
+    zlsma_limit: int = 500
+) -> list:
+    # 1. Initialize scanner and load markets
+    scanner = BinanceChandelierScanner()
+    scanner.exchange.load_markets()
 
+    # 2. Scan for chandelier buy signals
+    raw_results = scanner.scan_pairs(
+        timeframe=timeframe,
+        limit=scan_limit,
+        max_buy_candles=max_buy_candles
+    )
+    results_df = pd.DataFrame(raw_results)
+
+    # 3. Extract symbols and filter by ZLSMA
+    symbols = results_df['symbol'].tolist()
+    filtered_coins = filter_coins_above_zlsma(
+        symbols,
+        length=zlsma_length,
+        timeframe=timeframe,
+        limit=zlsma_limit
+    )
+
+    return filtered_coins
 
