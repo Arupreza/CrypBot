@@ -130,8 +130,7 @@ def filter_coins_above_zlsma(symbols, length=200, timeframe='15m', limit=500):
     Calculate ZLSMA(200) for a list of symbols and filter those with current price > ZLSMA.
     
     Parameters:
-    symbols: list - List of tradingėd
-    pairs (e.g., ['BTCUSDT', 'ETHUSDT'])
+    symbols: list - List of trading pairs (e.g., ['BTCUSDT', 'ETHUSDT'])
     length: int - ZLSMA period (default 200)
     timeframe: str - Candlestick timeframe (default '15m')
     limit: int - Number of candles to fetch (default 500)
@@ -316,38 +315,19 @@ class BinanceChandelierScanner:
             'rateLimit': 1200,
             'enableRateLimit': True,
         })
-        
-    def get_usdt_pairs(self):
-        """Get all active USDT trading pairs, excluding stablecoins"""
-        stablecoins = [
-            'GUSDUSDT', 'FRAXUSDT', 'USDDUSDT', 'MIMUSDT', 'LUSDUSDT', 'FEIUSDT', 'HUSDUSDT', 
-            'SUSDUSDT', 'OUSDUSDT', 'USTCUSDT', 'VAIUSDT', 'DOLAUSDT', 'ALUSDUSDT', 'MUSDUSDT', 
-            'DUSDUSDT', 'CUSDUSDT', 'NUSDUSDT', 'ZUSDUSDT', 'EURUSDT', "USDPUSDT", 'TUSDUSDT', 'PAXUSDT', 'BUSDUSDT', 'DAIUSDT', 'USDNUSDT', 'USDKUSDT',
-        ]
-        try:
-            markets = self.exchange.load_markets()
-            usdt_pairs = []
-            for symbol in markets.keys():
-                if (symbol.endswith('/USDT') and 
-                    markets[symbol]['active'] and 
-                    markets[symbol]['spot']):
-                    # Convert to Binance format: BTC/USDT -> BTCUSDT
-                    binance_symbol = symbol.replace('/', '')
-                    if binance_symbol not in stablecoins:
-                        usdt_pairs.append(binance_symbol)
-            
-            # Filter out leveraged tokens
-            filtered_pairs = [pair for pair in usdt_pairs 
-                            if not any(x in pair for x in ['UP', 'DOWN', 'BEAR', 'BULL'])]
-            return filtered_pairs
-        except:
-            return []
     
     def get_klines(self, symbol, timeframe='15m', limit=200):
         """Fetch OHLCV data for a symbol"""
         try:
-            # Convert back to ccxt format for API call
-            ccxt_symbol = symbol[:-4] + '/' + symbol[-4:]  # BTCUSDT -> BTC/USDT
+            # Handle both formats: BTCUSDT and BTC/USDT
+            if '/' not in symbol:
+                # Convert BTCUSDT to BTC/USDT for ccxt
+                if symbol.endswith('USDT'):
+                    ccxt_symbol = symbol[:-4] + '/USDT'
+                else:
+                    ccxt_symbol = symbol
+            else:
+                ccxt_symbol = symbol
             
             ohlcv = self.exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=limit)
             if not ohlcv or len(ohlcv) < 50:
@@ -356,7 +336,8 @@ class BinanceChandelierScanner:
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
-        except:
+        except Exception as e:
+            print(f"Error fetching data for {symbol}: {e}")
             return None
     
     def count_consecutive_buy_signals(self, df):
@@ -385,21 +366,47 @@ class BinanceChandelierScanner:
         
         return True, consecutive_count, signal_start_idx
     
-    def scan_pairs(self, timeframe='15m', limit=200, max_buy_candles=3):
+    def scan_custom_pairs(self, coin_list, timeframe='15m', limit=200, max_buy_candles=3):
         """
-        Scan USDT pairs for Chandelier Exit buy signals active for <= max_buy_candles
+        Scan custom list of coins for Chandelier Exit buy signals active for <= max_buy_candles
+        
+        Parameters:
+        coin_list: list - List of coins to scan (e.g., ['BTCUSDT', 'ETHUSDT'] or ['BTC', 'ETH'])
+        timeframe: str - Timeframe for analysis (default '15m')
+        limit: int - Number of candles to fetch (default 200)
+        max_buy_candles: int - Maximum number of consecutive buy candles to filter (default 3)
+        
+        Returns:
+        list - List of dictionaries with scan results
         """
-        usdt_pairs = self.get_usdt_pairs()
         results = []
         
-        for i, symbol in enumerate(usdt_pairs):
+        # Normalize coin list to USDT format
+        normalized_coins = []
+        for coin in coin_list:
+            if isinstance(coin, str):
+                coin = coin.upper().strip()
+                if coin.endswith('USDT'):
+                    normalized_coins.append(coin)
+                elif coin.endswith('/USDT'):
+                    normalized_coins.append(coin.replace('/', ''))
+                else:
+                    # Assume it's a base currency, add USDT
+                    normalized_coins.append(f"{coin}USDT")
+        
+        print(f"Scanning {len(normalized_coins)} coins: {normalized_coins}")
+        
+        for i, symbol in enumerate(normalized_coins):
             try:
+                #print(f"Processing {symbol} ({i+1}/{len(normalized_coins)})")
+                
                 # Get price data
                 df = self.get_klines(symbol, timeframe, limit)
                 if df is None:
+                    print(f"  - No data available for {symbol}")
                     continue
                 
-                # Calculate Chandelier Exit using your exact algorithm
+                # Calculate Chandelier Exit
                 df = calculate_chandelier(
                     df, 
                     atr_period=1, 
@@ -412,9 +419,6 @@ class BinanceChandelierScanner:
                 
                 if is_buy and consecutive_count <= max_buy_candles:
                     current_price = df['close'].iloc[-1]
-                    if current_price > 30:
-                        continue
-                        
                     signal_start_time = df['timestamp'].iloc[signal_start_idx]
                     current_time = df['timestamp'].iloc[-1]
                     
@@ -425,7 +429,7 @@ class BinanceChandelierScanner:
                             prev_sell_idx = j
                             break
                     
-                    results.append({
+                    result = {
                         'symbol': symbol,
                         'current_price': current_price,
                         'current_signal': 'BUY',
@@ -437,76 +441,100 @@ class BinanceChandelierScanner:
                         'atr_value': df['atr'].iloc[-1],
                         'long_stop': df['long_stop'].iloc[-1],
                         'short_stop': df['short_stop'].iloc[-1]
-                    })
+                    }
+                    
+                    results.append(result)
+                    #print(f"  ✓ Buy signal found: {consecutive_count} candles")
                 
                 # Rate limiting
                 time.sleep(0.1)
                 
-            except:
+            except Exception as e:
+                print(f"  - Error processing {symbol}: {e}")
                 continue
         
-        return results
-    
-    def display_results(self, results):
-        """Return scanning results"""
+        #print(f"\nFound {len(results)} coins with buy signals")
         return results
 
-def main():
-    """Main function"""
-    try:
-        scanner = BinanceChandelierScanner()
-        
-        # Test connection
-        markets = scanner.exchange.load_markets()
-        
-        # Run scan
-        results = scanner.scan_pairs(
-            timeframe='15m',      # 15-minute candles
-            limit=200,            # Enough data for signals
-            max_buy_candles=3     # Filter: ≤3 candles of buy signal
-        )
-        
-        # Get results
-        final_results = scanner.display_results(results)
-        
-        # Convert to DataFrame
-        df_results = pd.DataFrame(final_results) if final_results else pd.DataFrame()
-        
-        return df_results
-        
-    except:
-        return pd.DataFrame()
-
-if __name__ == "__main__":
-    df_results = main()
-    
-def chandelier_zlsma_filter(
+def chandelier_zlsma_filter_custom(
+    coin_list: list,
     timeframe: str = '15m',
     scan_limit: int = 200,
     max_buy_candles: int = 2,
     zlsma_length: int = 200,
     zlsma_limit: int = 500
-) -> list:
-    # 1. Initialize scanner and load markets
-    scanner = BinanceChandelierScanner()
-    scanner.exchange.load_markets()
+) -> pd.DataFrame:
+    """
+    Main function to scan custom list of coins with Chandelier Exit and ZLSMA filter
+    
+    Parameters:
+    coin_list: list - List of coins to scan (e.g., ['BTC', 'ETH', 'ADA'] or ['BTCUSDT', 'ETHUSDT'])
+    timeframe: str - Timeframe for analysis (default '15m')
+    scan_limit: int - Number of candles for chandelier analysis (default 200)
+    max_buy_candles: int - Max consecutive buy candles to filter (default 2)
+    zlsma_length: int - ZLSMA period (default 200)
+    zlsma_limit: int - Number of candles for ZLSMA calculation (default 500)
+    
+    Returns:
+    pandas DataFrame - Filtered results with both Chandelier buy signals and above ZLSMA
+    """
+    
+    if not coin_list:
+        print("Error: coin_list is empty")
+        return pd.DataFrame()
+    
+    try:
+        # 1. Initialize scanner
+        print("Initializing Binance scanner...")
+        scanner = BinanceChandelierScanner()
+        scanner.exchange.load_markets()
+        #print("Markets loaded successfully")
 
-    # 2. Scan for chandelier buy signals
-    raw_results = scanner.scan_pairs(
-        timeframe=timeframe,
-        limit=scan_limit,
-        max_buy_candles=max_buy_candles
-    )
-    results_df = pd.DataFrame(raw_results)
+        # 2. Scan for chandelier buy signals on custom list
+        print(f"\nStep 1: Scanning for Chandelier Exit buy signals...")
+        raw_results = scanner.scan_custom_pairs(
+            coin_list=coin_list,
+            timeframe=timeframe,
+            limit=scan_limit,
+            max_buy_candles=max_buy_candles
+        )
+        
+        if not raw_results:
+            print("No coins found with Chandelier buy signals")
+            return pd.DataFrame()
+        
+        results_df = pd.DataFrame(raw_results)
+        #print(f"Found {len(results_df)} coins with Chandelier buy signals")
 
-    # 3. Extract symbols and filter by ZLSMA
-    symbols = results_df['symbol'].tolist()
-    filtered_coins = filter_coins_above_zlsma(
-        symbols,
-        length=zlsma_length,
-        timeframe=timeframe,
-        limit=zlsma_limit
-    )
-
-    return filtered_coins
-
+        # 3. Extract symbols and filter by ZLSMA
+        print(f"\nStep 2: Filtering by ZLSMA({zlsma_length})...")
+        symbols = results_df['symbol'].tolist()
+        filtered_coins = filter_coins_above_zlsma(
+            symbols,
+            length=zlsma_length,
+            timeframe=timeframe,
+            limit=zlsma_limit
+        )
+        
+        if filtered_coins.empty:
+            print("No coins passed the ZLSMA filter")
+            return pd.DataFrame()
+        
+        #print(f"Found {len(filtered_coins)} coins above ZLSMA")
+        
+        # 4. Merge results
+        final_results = results_df[results_df['symbol'].isin(filtered_coins['symbol'])]
+        
+        # Add ZLSMA data
+        final_results = final_results.merge(
+            filtered_coins[['symbol', 'zlsma_200', 'price_above_zlsma']], 
+            on='symbol', 
+            how='left'
+        )
+        
+        #print(f"\nFinal results: {len(final_results)} coins passed both filters")
+        return final_results.sort_values('buy_candles_count')
+        
+    except Exception as e:
+        print(f"Error in chandelier_zlsma_filter_custom: {e}")
+        return pd.DataFrame()
