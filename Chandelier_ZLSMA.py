@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from scipy import stats
+import ccxt
 
 def linreg(data, length, offset=0):
     """
@@ -128,14 +129,14 @@ def calculate_zlsma(in_df, close_column='close', timestamp_column=None, length=3
         x_axis = df.index
         x_label = 'Candle Index'
         print("Warning: No timestamp column found, using index for X-axis")
-        print(f"Available columns: {list(df.columns)}")
+        #print(f"Available columns: {list(df.columns)}")
     
-    print(f"Data loaded: {len(df)} rows")
-    print(f"Calculating ZLSMA with length {length}...")
+    #print(f"Data loaded: {len(df)} rows")
+    #print(f"Calculating ZLSMA with length {length}...")
     
     # Calculate minimum required data points
     min_required = 2 * length - 1
-    print(f"Note: ZLSMA needs at least {min_required} rows to start producing values")
+    #print(f"Note: ZLSMA needs at least {min_required} rows to start producing values")
     
     # Calculate ZLSMA
     df[f'zlsma_{length}'] = zlsma(df[close_column], length=length)
@@ -278,7 +279,7 @@ def calculate_chandelier(
             df['timestamp'] = df.index
         else:
             df['timestamp'] = df.index
-            print("Warning: No timestamp column found in Chandelier. Using index as 'timestamp'.")
+            #print("Warning: No timestamp column found in Chandelier. Using index as 'timestamp'.")
 
     # Verify required columns
     missing = [c for c in ['high', 'low', 'close'] if c not in df.columns]
@@ -356,3 +357,175 @@ df_chandelier = calculate_chandelier(df, atr_period=1, atr_multiplier=2.0)
 merged_chandelier_zlsma = merge_zlsma_chandelier(df_zlsma, df_chandelier)
 merged_chandelier_zlsma = merged_chandelier_zlsma[["timestamp", "close", "zlsma_200", "buy_signal", "sell_signal"]]
 """
+
+
+
+
+
+def calculate_atr(df: pd.DataFrame, length: int = 1) -> pd.Series:
+    """
+    Calculate Average True Range (ATR). Returns a pd.Series.
+    """
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift()).abs()
+    low_close_prev = (df['low'] - df['close'].shift()).abs()
+
+    true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    atr = true_range.rolling(window=length).mean()
+    return atr
+
+def chandelier_exit(
+    df: pd.DataFrame,
+    atr_period: int = 1,
+    atr_multiplier: float = 2.0,
+    use_close: bool = True
+) -> pd.DataFrame:
+    """
+    Given a DataFrame with at least 'high','low','close', this returns a copy of `df` with:
+    - 'atr'
+    - 'long_stop'
+    - 'short_stop'
+    - 'direction'
+    - 'chandelier_exit'
+    - 'buy_signal' (1 for entire duration while direction is long)
+    - 'sell_signal' (1 for entire duration while direction is short)
+    """
+    df_result = df.copy()
+
+    # Compute ATR
+    atr_raw = calculate_atr(df, length=atr_period)
+    atr = atr_raw * atr_multiplier
+
+    # Compute rolling highest/lowest
+    if use_close:
+        highest = df['close'].rolling(window=atr_period).max()
+        lowest = df['close'].rolling(window=atr_period).min()
+    else:
+        highest = df['high'].rolling(window=atr_period).max()
+        lowest = df['low'].rolling(window=atr_period).min()
+
+    n = len(df)
+    long_stop_array = np.full(n, np.nan)
+    short_stop_array = np.full(n, np.nan)
+    direction_array = np.full(n, 1)
+
+    for i in range(n):
+        if pd.isna(atr.iloc[i]) or pd.isna(highest.iloc[i]) or pd.isna(lowest.iloc[i]):
+            continue
+
+        curr_long = highest.iloc[i] - atr.iloc[i]
+        curr_short = lowest.iloc[i] + atr.iloc[i]
+
+        if i == 0:
+            long_stop_array[i] = curr_long
+            short_stop_array[i] = curr_short
+            direction_array[i] = 1
+        else:
+            prev_long = long_stop_array[i - 1] if not pd.isna(long_stop_array[i - 1]) else curr_long
+            if df['close'].iloc[i - 1] > prev_long:
+                long_stop_array[i] = max(curr_long, prev_long)
+            else:
+                long_stop_array[i] = curr_long
+
+            prev_short = short_stop_array[i - 1] if not pd.isna(short_stop_array[i - 1]) else curr_short
+            if df['close'].iloc[i - 1] < prev_short:
+                short_stop_array[i] = min(curr_short, prev_short)
+            else:
+                short_stop_array[i] = curr_short
+
+            prev_short_val = short_stop_array[i - 1] if not pd.isna(short_stop_array[i - 1]) else curr_short
+            prev_long_val = long_stop_array[i - 1] if not pd.isna(long_stop_array[i - 1]) else curr_long
+
+            if df['close'].iloc[i] > prev_short_val:
+                direction_array[i] = 1
+            elif df['close'].iloc[i] < prev_long_val:
+                direction_array[i] = -1
+            else:
+                direction_array[i] = direction_array[i - 1]
+
+    df_result['atr'] = atr
+    df_result['long_stop'] = long_stop_array
+    df_result['short_stop'] = short_stop_array
+    df_result['direction'] = direction_array
+    df_result['chandelier_exit'] = np.where(direction_array == 1, long_stop_array, short_stop_array)
+    df_result['buy_signal'] = (df_result['direction'] == 1).astype(int)
+    df_result['sell_signal'] = (df_result['direction'] == -1).astype(int)
+
+    return df_result
+
+def fetch_crypto_data(symbol, timeframe='15m', limit=200):
+    """
+    Fetch crypto/USDT historical data from Binance
+    
+    Parameters:
+    symbol: str - Cryptocurrency symbol (e.g., 'BTC', 'ETH', 'SOL')
+    timeframe: str - Candlestick timeframe (default '15m')
+    limit: int - Number of candles to fetch (default 200)
+    
+    Returns:
+    pandas DataFrame - OHLCV data
+    """
+    try:
+        # Ensure symbol is uppercase and add /USDT pair
+        symbol = symbol.upper()
+        if not symbol.endswith('/USDT'):
+            if symbol.endswith('USDT'):
+                # If user inputs 'BTCUSDT', convert to 'BTC/USDT'
+                symbol = symbol[:-4] + '/USDT'
+            else:
+                # If user inputs 'BTC', convert to 'BTC/USDT'
+                symbol = symbol + '/USDT'
+        
+        exchange = ccxt.binance()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        return df, symbol
+    except Exception as e:
+        print(f"Error fetching {symbol} data: {e}")
+        return None, symbol
+
+def only_chandelier(
+    symbol,
+    timeframe='15m',
+    limit=200,
+    atr_period=1,
+    atr_multiplier=2.0,
+    use_close=True
+):
+    """
+    Main function to fetch crypto data and calculate Chandelier Exit
+    
+    Parameters:
+    symbol: str - Cryptocurrency symbol (e.g., 'BTC', 'ETH', 'SOL', 'ADA')
+    timeframe: str - Candlestick timeframe (default '15m')
+    limit: int - Number of candles to fetch (default 200)
+    atr_period: int - ATR period (default 1)
+    atr_multiplier: float - ATR multiplier (default 2.0)
+    use_close: bool - Use close prices for high/low calculation (default True)
+    
+    Returns:
+    pandas DataFrame - Crypto data with Chandelier Exit signals
+    """
+    # Fetch crypto data
+    print(f"Fetching {symbol.upper()}/USDT data from Binance...")
+    df, trading_pair = fetch_crypto_data(symbol, timeframe, limit)
+    
+    if df is None:
+        print(f"Failed to fetch {trading_pair} data")
+        return None
+    
+    #print(f"Fetched {len(df)} candles for {trading_pair}")
+    
+    # Calculate Chandelier Exit
+    #print("Calculating Chandelier Exit...")
+    df_result = chandelier_exit(
+        df,
+        atr_period=atr_period,
+        atr_multiplier=atr_multiplier,
+        use_close=use_close
+    )
+    
+    return df_result
