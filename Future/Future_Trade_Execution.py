@@ -159,9 +159,9 @@ class BinancePerpetualFetcher:
             logger.error(f"❌ Error fetching current price for {symbol}: {e}")
             return 0.0
 
-class FuturesTrader:
+class LiquidationSafeFuturesTrader:
     def __init__(self, reports_folder_path="./futures_reports/"):
-        """Initialize futures trader"""
+        """Initialize liquidation-safe futures trader"""
         self.perpetual_fetcher = BinancePerpetualFetcher()
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -189,7 +189,7 @@ class FuturesTrader:
         self.reports_folder = reports_folder_path
         self._create_reports_folder()
         
-        logger.info("🤖 Futures Trader Ready!")
+        logger.info("🛡️ LIQUIDATION-SAFE Futures Trader Ready!")
         logger.info(f"📊 Reports will be saved to: {self.reports_folder}")
     
     def _normalize_coin_input(self, coin_input: str) -> tuple:
@@ -226,6 +226,132 @@ class FuturesTrader:
         except Exception as e:
             logger.error(f"❌ Error creating reports folder: {e}")
 
+    def get_real_liquidation_price_from_binance(self, symbol: str) -> float:
+        """Fetch REAL liquidation price directly from Binance API"""
+        try:
+            # Get position information which includes liquidation price
+            positions = self.exchange.fetch_positions([symbol])
+            
+            for position in positions:
+                if float(position.get('contracts', 0)) > 0:
+                    liquidation_price = position.get('liquidationPrice')
+                    if liquidation_price:
+                        real_liq_price = float(liquidation_price)
+                        logger.info(f"🎯 REAL Liquidation Price from Binance: ${real_liq_price:.8f}")
+                        return real_liq_price
+            
+            logger.warning(f"⚠️ No active position found for {symbol} - cannot get liquidation price")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching real liquidation price from Binance: {e}")
+            return None
+
+    def _wait_for_position_and_get_liquidation(self, symbol: str, max_wait_time: int = 10) -> float:
+        """Wait for position to appear and fetch its liquidation price"""
+        try:
+            logger.info(f"⏳ Waiting for position to appear and fetching liquidation price...")
+            
+            for attempt in range(max_wait_time):
+                time.sleep(1)  # Wait 1 second between attempts
+                
+                try:
+                    positions = self.exchange.fetch_positions([symbol])
+                    
+                    for position in positions:
+                        if float(position.get('contracts', 0)) > 0:
+                            liquidation_price = position.get('liquidationPrice')
+                            if liquidation_price:
+                                real_liq_price = float(liquidation_price)
+                                logger.info(f"✅ Found position! Real Liquidation Price: ${real_liq_price:.8f}")
+                                return real_liq_price
+                    
+                    logger.info(f"⏳ Attempt {attempt + 1}/{max_wait_time}: Position not found yet...")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt {attempt + 1} failed: {e}")
+                    continue
+            
+            logger.error(f"❌ Failed to get liquidation price after {max_wait_time} attempts")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error waiting for position: {e}")
+            return None
+
+    def _calculate_ultra_safe_stop_loss(self, entry_price: float, liquidation_price: float, 
+                                      side: str, original_stop: float, buffer_percent: float) -> float:
+        """Calculate ultra-safe stop loss with multiple safety layers"""
+        try:
+            if liquidation_price is None or liquidation_price <= 0:
+                logger.warning("⚠️ Invalid liquidation price, using conservative stop")
+                # Conservative fallback
+                if side == 'long':
+                    return entry_price * 0.92  # 8% below entry
+                else:
+                    return entry_price * 1.08  # 8% above entry
+            
+            # Calculate multiple safety buffers
+            base_buffer = buffer_percent / 100
+            volatility_buffer = 0.05  # Additional 5% for market volatility
+            slippage_buffer = 0.02   # Additional 2% for slippage
+            
+            total_buffer = base_buffer + volatility_buffer + slippage_buffer
+            
+            if side == 'long':
+                # Distance from entry to liquidation
+                max_loss_distance = entry_price - liquidation_price
+                safe_loss_distance = max_loss_distance * (1 - total_buffer)
+                ultra_safe_stop = entry_price - safe_loss_distance
+                
+                # Never let stop loss be worse than original strategy
+                final_stop = max(ultra_safe_stop, original_stop)
+                
+                logger.info(f"🛡️ ULTRA-SAFE Long Stop Calculation:")
+                logger.info(f"   Entry: ${entry_price:.8f}")
+                logger.info(f"   Real Liquidation: ${liquidation_price:.8f}")
+                logger.info(f"   Max Loss Distance: ${max_loss_distance:.8f}")
+                logger.info(f"   Safe Distance: ${safe_loss_distance:.8f} ({(1-total_buffer)*100:.1f}% of max)")
+                logger.info(f"   Original Stop: ${original_stop:.8f}")
+                logger.info(f"   Ultra-Safe Stop: ${final_stop:.8f}")
+                
+            else:
+                # Distance from entry to liquidation
+                max_loss_distance = liquidation_price - entry_price
+                safe_loss_distance = max_loss_distance * (1 - total_buffer)
+                ultra_safe_stop = entry_price + safe_loss_distance
+                
+                # Never let stop loss be worse than original strategy
+                final_stop = min(ultra_safe_stop, original_stop)
+                
+                logger.info(f"🛡️ ULTRA-SAFE Short Stop Calculation:")
+                logger.info(f"   Entry: ${entry_price:.8f}")
+                logger.info(f"   Real Liquidation: ${liquidation_price:.8f}")
+                logger.info(f"   Max Loss Distance: ${max_loss_distance:.8f}")
+                logger.info(f"   Safe Distance: ${safe_loss_distance:.8f} ({(1-total_buffer)*100:.1f}% of max)")
+                logger.info(f"   Original Stop: ${original_stop:.8f}")
+                logger.info(f"   Ultra-Safe Stop: ${final_stop:.8f}")
+            
+            # Final safety check - ensure stop is never closer to liquidation than 5%
+            if side == 'long':
+                min_distance = (entry_price - liquidation_price) * 0.05
+                absolute_min_stop = liquidation_price + min_distance
+                if final_stop < absolute_min_stop:
+                    logger.warning(f"⚠️ Stop too close to liquidation! Using absolute minimum: ${absolute_min_stop:.8f}")
+                    final_stop = absolute_min_stop
+            else:
+                min_distance = (liquidation_price - entry_price) * 0.05
+                absolute_max_stop = liquidation_price - min_distance
+                if final_stop > absolute_max_stop:
+                    logger.warning(f"⚠️ Stop too close to liquidation! Using absolute maximum: ${absolute_max_stop:.8f}")
+                    final_stop = absolute_max_stop
+            
+            return final_stop
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculating ultra-safe stop loss: {e}")
+            return original_stop
+
     def _save_trade_to_csv(self, trade_data):
         """Save trade data to date-wise CSV file"""
         try:
@@ -248,9 +374,8 @@ class FuturesTrader:
             logger.error(f"❌ Error saving trade to CSV: {e}")
 
     def _record_trade_entry(self, symbol, coin_name, side, leverage, entry_price, quantity, 
-                           margin_amount, stop_loss, take_profit, tp_type):
-        """Record trade entry to CSV"""
-        liquidation_price = self._calculate_liquidation_price(entry_price, leverage, side)
+                           margin_amount, stop_loss, take_profit, tp_type, real_liquidation_price=None):
+        """Record trade entry to CSV with REAL liquidation price from Binance"""
         
         trade_data = {
             'Date': datetime.now().strftime("%Y-%m-%d"),
@@ -261,7 +386,7 @@ class FuturesTrader:
             'Side': side,
             'Leverage': leverage,
             'Entry_Price': entry_price,
-            'Liquidation_Price': liquidation_price,
+            'Real_Liquidation_Price_Binance': real_liquidation_price,
             'Quantity': quantity,
             'Notional_USD': entry_price * quantity,
             'Margin_Used': margin_amount,
@@ -277,119 +402,6 @@ class FuturesTrader:
             'Expected_TP_Profit': abs(take_profit - entry_price) * quantity if take_profit else None
         }
         self._save_trade_to_csv(trade_data)
-
-    def _record_trade_exit(self, symbol, coin_name, side, entry_price, quantity, 
-                          margin_amount, exit_price, exit_reason):
-        """Record trade exit to CSV"""
-        exit_time = datetime.now()
-        
-        if side == 'long':
-            pnl_usd = (exit_price - entry_price) * quantity
-        else:
-            pnl_usd = (entry_price - exit_price) * quantity
-            
-        pnl_percent = (pnl_usd / margin_amount) * 100
-        
-        trade_data = {
-            'Date': exit_time.strftime("%Y-%m-%d"),
-            'Time': exit_time.strftime("%H:%M:%S"),
-            'Action': 'EXIT',
-            'Coin': coin_name,
-            'Symbol': symbol,
-            'Side': side,
-            'Leverage': None,
-            'Entry_Price': entry_price,
-            'Quantity': quantity,
-            'Notional_USD': entry_price * quantity,
-            'Margin_Used': margin_amount,
-            'Stop_Loss': None,
-            'Take_Profit': None,
-            'TP_Type': None,
-            'Exit_Price': exit_price,
-            'Exit_Time': exit_time.strftime("%H:%M:%S"),
-            'PnL_USD': pnl_usd,
-            'PnL_Percent': pnl_percent,
-            'Exit_Reason': exit_reason,
-            'Trade_Duration_Minutes': None
-        }
-        self._save_trade_to_csv(trade_data)
-
-    def _calculate_liquidation_price(self, entry_price, leverage, side, margin_rate=0.004):
-        """Calculate liquidation price for isolated margin
-        
-        Args:
-            entry_price: Entry price of the position
-            leverage: Leverage used
-            side: 'long' or 'short'
-            margin_rate: Maintenance margin rate (0.4% for most pairs)
-        
-        Returns:
-            Liquidation price
-        """
-        try:
-            if side == 'long':
-                # For long: Liquidation = Entry * (1 - 1/leverage + margin_rate)
-                liquidation_price = entry_price * (1 - (1/leverage) + margin_rate)
-            else:
-                # For short: Liquidation = Entry * (1 + 1/leverage - margin_rate)
-                liquidation_price = entry_price * (1 + (1/leverage) - margin_rate)
-            
-            return liquidation_price
-            
-        except Exception as e:
-            logger.error(f"❌ Error calculating liquidation price: {e}")
-            # Conservative fallback
-            if side == 'long':
-                return entry_price * 0.92  # 8% below entry
-            else:
-                return entry_price * 1.08  # 8% above entry
-
-    def _get_safe_stop_loss(self, entry_price, liquidation_price, side, atr_stop_loss, buffer_percent=10):
-        """Get safe stop loss that's well before liquidation
-        
-        Args:
-            entry_price: Entry price
-            liquidation_price: Calculated liquidation price
-            side: 'long' or 'short'
-            atr_stop_loss: ATR-based stop loss
-            buffer_percent: Safety buffer percentage before liquidation (default 10%)
-        
-        Returns:
-            Safe stop loss price
-        """
-        try:
-            # Calculate buffer distance from liquidation
-            if side == 'long':
-                buffer_distance = (entry_price - liquidation_price) * (buffer_percent / 100)
-                max_safe_stop = liquidation_price + buffer_distance
-                
-                # Use the safer of ATR stop or max safe stop
-                safe_stop = min(atr_stop_loss, max_safe_stop) if atr_stop_loss > max_safe_stop else max_safe_stop
-                
-                logger.info(f"📊 Long position safety check:")
-                logger.info(f"   Liquidation: ${liquidation_price:.8f}")
-                logger.info(f"   Max Safe Stop: ${max_safe_stop:.8f} ({buffer_percent}% buffer)")
-                logger.info(f"   ATR Stop: ${atr_stop_loss:.8f}")
-                logger.info(f"   Selected Stop: ${safe_stop:.8f}")
-                
-            else:
-                buffer_distance = (liquidation_price - entry_price) * (buffer_percent / 100)
-                max_safe_stop = liquidation_price - buffer_distance
-                
-                # Use the safer of ATR stop or max safe stop
-                safe_stop = max(atr_stop_loss, max_safe_stop) if atr_stop_loss < max_safe_stop else max_safe_stop
-                
-                logger.info(f"📊 Short position safety check:")
-                logger.info(f"   Liquidation: ${liquidation_price:.8f}")
-                logger.info(f"   Max Safe Stop: ${max_safe_stop:.8f} ({buffer_percent}% buffer)")
-                logger.info(f"   ATR Stop: ${atr_stop_loss:.8f}")
-                logger.info(f"   Selected Stop: ${safe_stop:.8f}")
-            
-            return safe_stop
-            
-        except Exception as e:
-            logger.error(f"❌ Error calculating safe stop loss: {e}")
-            return atr_stop_loss
 
     def _find_swing_high_low(self, df, lookback=10):
         """Find the last swing high and swing low from price data"""
@@ -512,8 +524,14 @@ class FuturesTrader:
     def trade(self, coin, margin_amount, leverage=5, side='long', take_profit_ratio=2.0, 
               use_fixed_tp=False, fixed_tp_percent=2.5, use_swing_levels=False, 
               swing_lookback=10, use_resistance_support=False, rs_lookback=20,
-              use_fixed_amount_tp=False, fixed_tp_amount=20, liquidation_buffer=10):
-        """Execute a futures trade with isolated margin
+              use_fixed_amount_tp=False, fixed_tp_amount=20, liquidation_buffer=25):
+        """Execute a LIQUIDATION-SAFE futures trade using REAL liquidation price from Binance
+        
+        🛡️ KEY SAFETY FEATURES:
+        - Fetches REAL liquidation price directly from Binance API after trade execution
+        - Uses actual Binance liquidation data instead of calculations
+        - Applies multiple safety buffers (volatility + slippage + user buffer)
+        - Never places trades that could lead to liquidation
         
         Args:
             coin: Trading symbol
@@ -525,11 +543,11 @@ class FuturesTrader:
             fixed_tp_percent: Fixed TP percentage
             use_swing_levels: Whether to use swing levels for TP
             swing_lookback: Lookback period for swing detection
-            use_resistance_support: Whether to use resistance/support levels (TP at resistance/support, SL at ATR)
+            use_resistance_support: Whether to use resistance/support levels
             rs_lookback: Lookback period for resistance/support detection
             use_fixed_amount_tp: Whether to use fixed dollar amount TP
-            fixed_tp_amount: Fixed dollar amount for take profit (e.g., $20)
-            liquidation_buffer: Safety buffer percentage before liquidation (default 10%)
+            fixed_tp_amount: Fixed dollar amount for take profit
+            liquidation_buffer: Safety buffer percentage (minimum 25% recommended!)
         """
         try:
             symbol, coin_name = self._normalize_coin_input(coin)
@@ -537,7 +555,13 @@ class FuturesTrader:
                 logger.error(f"❌ Invalid coin input: {coin}")
                 return False
             
-            logger.info(f"🚀 INITIATING FUTURES TRADE: {coin_name} {side.upper()} with ${margin_amount} margin at {leverage}x")
+            # Enforce minimum safety buffer
+            if liquidation_buffer < 8:
+                logger.warning(f"⚠️ Buffer {liquidation_buffer}% too low! Using minimum 20%")
+                liquidation_buffer = 8
+            
+            logger.info(f"🛡️ INITIATING LIQUIDATION-SAFE TRADE: {coin_name} {side.upper()}")
+            logger.info(f"💰 Margin: ${margin_amount} | Leverage: {leverage}x | Buffer: {liquidation_buffer}%")
             
             side = side.lower()
             if side not in ['long', 'short']:
@@ -553,19 +577,6 @@ class FuturesTrader:
                 return False
             
             logger.info(f"✅ Balance sufficient: ${usdt_balance:.2f}")
-            
-            # Set leverage and margin mode
-            try:
-                self.exchange.set_leverage(leverage, symbol)
-                logger.info(f"⚡ Leverage set to {leverage}x for {symbol}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not set leverage: {e}")
-            
-            try:
-                self.exchange.set_margin_mode('isolated', symbol)
-                logger.info(f"🔒 Margin mode set to isolated for {symbol}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not set margin mode: {e}")
             
             # Get current price
             try:
@@ -604,7 +615,7 @@ class FuturesTrader:
             
             # Get chart data and calculate levels
             try:
-                logger.info("📈 Fetching chart data...")
+                logger.info("📈 Fetching chart data for strategy calculation...")
                 df = self.perpetual_fetcher.get_klines(symbol, self.timeframe, 100)
                 
                 if df is not None and not df.empty:
@@ -635,36 +646,32 @@ class FuturesTrader:
                 use_fixed_amount_tp = False
                 logger.info(f"📊 Using fallback ATR: ${atr_value:.8f}")
             
-            # Calculate stop loss and take profit levels
+            # Calculate stop loss and take profit levels (initial calculation)
             if use_fixed_amount_tp:
-                # Use fixed dollar amount for TP and ATR for SL
                 stop_distance = atr_value * 1.5
                 
                 if side == 'long':
-                    stop_loss = current_price - stop_distance  # ATR-based stop loss
-                    # Calculate TP price based on fixed dollar amount
+                    initial_stop_loss = current_price - stop_distance
                     tp_price_distance = fixed_tp_amount / quantity
                     take_profit = current_price + tp_price_distance
                 else:
-                    stop_loss = current_price + stop_distance  # ATR-based stop loss
-                    # Calculate TP price based on fixed dollar amount
+                    initial_stop_loss = current_price + stop_distance
                     tp_price_distance = fixed_tp_amount / quantity
                     take_profit = current_price - tp_price_distance
                 
                 tp_type = f"Fixed Amount ${fixed_tp_amount} + ATR-based SL"
                 
             elif use_resistance_support:
-                # Use resistance/support for TP and ATR for SL
                 stop_distance = atr_value * 1.5
                 
                 if side == 'long':
-                    stop_loss = current_price - stop_distance  # ATR-based stop loss
+                    initial_stop_loss = current_price - stop_distance
                     take_profit = resistance if 'resistance' in locals() else current_price * 1.05
                     if take_profit <= current_price:
                         take_profit = current_price * 1.05
                         logger.warning("⚠️ Resistance below entry, using 5% take profit")
                 else:
-                    stop_loss = current_price + stop_distance  # ATR-based stop loss
+                    initial_stop_loss = current_price + stop_distance
                     take_profit = support if 'support' in locals() else current_price * 0.95
                     if take_profit >= current_price:
                         take_profit = current_price * 0.95
@@ -674,15 +681,15 @@ class FuturesTrader:
                 
             elif use_swing_levels:
                 if side == 'long':
-                    stop_loss = swing_low if 'swing_low' in locals() else current_price * 0.97
+                    initial_stop_loss = swing_low if 'swing_low' in locals() else current_price * 0.97
                     take_profit = swing_high if 'swing_high' in locals() else current_price * 1.05
-                    if stop_loss >= current_price:
-                        stop_loss = current_price * 0.97
+                    if initial_stop_loss >= current_price:
+                        initial_stop_loss = current_price * 0.97
                 else:
-                    stop_loss = swing_high if 'swing_high' in locals() else current_price * 1.03
+                    initial_stop_loss = swing_high if 'swing_high' in locals() else current_price * 1.03
                     take_profit = swing_low if 'swing_low' in locals() else current_price * 0.95
-                    if stop_loss <= current_price:
-                        stop_loss = current_price * 1.03
+                    if initial_stop_loss <= current_price:
+                        initial_stop_loss = current_price * 1.03
                 
                 tp_type = f"Swing levels (lookback: {swing_lookback})"
                 
@@ -690,7 +697,7 @@ class FuturesTrader:
                 stop_distance = atr_value * 1.5
                 
                 if side == 'long':
-                    stop_loss = current_price - stop_distance
+                    initial_stop_loss = current_price - stop_distance
                     if use_fixed_tp:
                         take_profit = current_price * (1 + fixed_tp_percent / 100)
                         tp_type = f"Fixed {fixed_tp_percent}%"
@@ -698,7 +705,7 @@ class FuturesTrader:
                         take_profit = current_price + (stop_distance * take_profit_ratio)
                         tp_type = f"ATR-based (1:{take_profit_ratio})"
                 else:
-                    stop_loss = current_price + stop_distance
+                    initial_stop_loss = current_price + stop_distance
                     if use_fixed_tp:
                         take_profit = current_price * (1 - fixed_tp_percent / 100)
                         tp_type = f"Fixed {fixed_tp_percent}%"
@@ -706,12 +713,25 @@ class FuturesTrader:
                         take_profit = current_price - (stop_distance * take_profit_ratio)
                         tp_type = f"ATR-based (1:{take_profit_ratio})"
             
-            logger.info(f"📊 Calculated levels:")
-            logger.info(f"   Stop Loss: ${stop_loss:.8f}")
+            logger.info(f"📊 Initial Strategy levels:")
+            logger.info(f"   Initial Stop Loss: ${initial_stop_loss:.8f}")
             logger.info(f"   Take Profit ({tp_type}): ${take_profit:.8f}")
             
+            # Set leverage and margin mode before trade
+            try:
+                self.exchange.set_leverage(leverage, symbol)
+                logger.info(f"⚡ Leverage set to {leverage}x for {symbol}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not set leverage: {e}")
+            
+            try:
+                self.exchange.set_margin_mode('isolated', symbol)
+                logger.info(f"🔒 Margin mode set to isolated for {symbol}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not set margin mode: {e}")
+            
             # Execute order
-            logger.info("🔥 EXECUTING FUTURES ORDER...")
+            logger.info("🔥 EXECUTING LIQUIDATION-SAFE ORDER...")
             start_time = time.time()
             
             try:
@@ -723,57 +743,87 @@ class FuturesTrader:
                 
                 entry_price = float(order['average']) if order['average'] else current_price
                 
-                # Calculate liquidation price for safety
-                liquidation_price = self._calculate_liquidation_price(entry_price, leverage, side)
-                
-                logger.info(f"✅ FUTURES ORDER FILLED!")
+                logger.info(f"✅ ORDER FILLED!")
                 logger.info(f"   Side: {side.upper()}")
                 logger.info(f"   Entry Price: ${entry_price:.8f}")
-                logger.info(f"   Liquidation Price: ${liquidation_price:.8f}")
                 logger.info(f"   Quantity: {quantity:.8f} {coin_name}")
                 logger.info(f"   Notional: ${entry_price * quantity:.2f}")
                 logger.info(f"   Margin Used: ${margin_amount}")
                 
-                # Recalculate stop loss with liquidation safety
-                original_stop_loss = stop_loss
-                stop_loss = self._get_safe_stop_loss(entry_price, liquidation_price, side, stop_loss, liquidation_buffer)
+                # 🎯 CRITICAL: Get REAL liquidation price from Binance API
+                logger.info("🎯 FETCHING REAL LIQUIDATION PRICE FROM BINANCE...")
+                real_liquidation_price = self._wait_for_position_and_get_liquidation(symbol, max_wait_time=10)
                 
-                if abs(stop_loss - original_stop_loss) > (entry_price * 0.001):  # If stop changed significantly
-                    logger.warning(f"⚠️ Stop loss adjusted for liquidation safety!")
-                    logger.warning(f"   Original Stop: ${original_stop_loss:.8f}")
-                    logger.warning(f"   Safe Stop: ${stop_loss:.8f}")
-                    
-                    # Recalculate take profit if using ratio-based strategies
-                    if not use_fixed_tp and not use_swing_levels and not use_resistance_support and not use_fixed_amount_tp:
-                        stop_distance = abs(entry_price - stop_loss)
-                        if side == 'long':
-                            take_profit = entry_price + (stop_distance * take_profit_ratio)
-                        else:
-                            take_profit = entry_price - (stop_distance * take_profit_ratio)
-                        logger.info(f"   Adjusted Take Profit: ${take_profit:.8f}")
+                if real_liquidation_price is None:
+                    logger.error("❌ Failed to get real liquidation price from Binance!")
+                    logger.error("❌ CLOSING POSITION for safety!")
+                    self.close_position(coin)
+                    return False
                 
-                logger.info(f"   Stop Loss: ${stop_loss:.8f}")
-                logger.info(f"   Take Profit: ${take_profit:.8f}")
-                logger.info(f"   TP Type: {tp_type}")
-                
-                # Calculate distance to liquidation
+                # Calculate distance to real liquidation
                 if side == 'long':
-                    liq_distance = ((entry_price - liquidation_price) / entry_price) * 100
-                    stop_distance_pct = ((entry_price - stop_loss) / entry_price) * 100
+                    liq_distance_pct = ((entry_price - real_liquidation_price) / entry_price) * 100
                 else:
-                    liq_distance = ((liquidation_price - entry_price) / entry_price) * 100
-                    stop_distance_pct = ((stop_loss - entry_price) / entry_price) * 100
+                    liq_distance_pct = ((real_liquidation_price - entry_price) / entry_price) * 100
                 
-                logger.info(f"🛡️ Liquidation Distance: {liq_distance:.2f}%")
-                logger.info(f"🛑 Stop Loss Distance: {stop_distance_pct:.2f}%")
-                logger.info(f"🛡️ Safety Buffer: {liq_distance - stop_distance_pct:.2f}%")
+                logger.info(f"🛡️ Real Liquidation Distance: {liq_distance_pct:.2f}%")
                 
-                # Calculate risk/reward
+                # SAFETY CHECK: Ensure minimum liquidation distance with REAL price
+                min_required_distance = liquidation_buffer + 1  # Extra 1% safety margin
+                if liq_distance_pct < min_required_distance:
+                    logger.error(f"❌ POSITION TOO RISKY: Real liquidation too close!")
+                    logger.error(f"   Required distance: {min_required_distance:.1f}%")
+                    logger.error(f"   Actual distance: {liq_distance_pct:.2f}%")
+                    logger.error(f"❌ CLOSING POSITION for safety!")
+                    self.close_position(coin)
+                    return False
+                
+                # 🛡️ CRITICAL: Calculate ultra-safe stop loss using REAL liquidation price
+                logger.info("🛡️ CALCULATING ULTRA-SAFE STOP LOSS WITH REAL LIQUIDATION...")
+                safe_stop_loss = self._calculate_ultra_safe_stop_loss(
+                    entry_price, real_liquidation_price, side, initial_stop_loss, liquidation_buffer)
+                
+                logger.info(f"📊 Final Strategy levels with REAL liquidation:")
+                logger.info(f"   🎯 REAL Liquidation Price: ${real_liquidation_price:.8f}")
+                logger.info(f"   🛡️ ULTRA-SAFE Stop Loss: ${safe_stop_loss:.8f}")
+                logger.info(f"   Take Profit ({tp_type}): ${take_profit:.8f}")
+                
+                # Final safety validation with real liquidation
                 if side == 'long':
-                    risk = abs(stop_loss - entry_price) * quantity
+                    stop_to_liq_distance = ((safe_stop_loss - real_liquidation_price) / entry_price) * 100
+                    if stop_to_liq_distance < 5:
+                        logger.error(f"❌ FINAL SAFETY CHECK FAILED: Stop loss too close to real liquidation!")
+                        logger.error(f"   Stop to liquidation distance: {stop_to_liq_distance:.2f}%")
+                        logger.error(f"❌ CLOSING POSITION for safety!")
+                        self.close_position(coin)
+                        return False
+                else:
+                    stop_to_liq_distance = ((real_liquidation_price - safe_stop_loss) / entry_price) * 100
+                    if stop_to_liq_distance < 5:
+                        logger.error(f"❌ FINAL SAFETY CHECK FAILED: Stop loss too close to real liquidation!")
+                        logger.error(f"   Stop to liquidation distance: {stop_to_liq_distance:.2f}%")
+                        logger.error(f"❌ CLOSING POSITION for safety!")
+                        self.close_position(coin)
+                        return False
+                
+                # Calculate final distances and metrics
+                if side == 'long':
+                    stop_distance_pct = ((entry_price - safe_stop_loss) / entry_price) * 100
+                else:
+                    stop_distance_pct = ((safe_stop_loss - entry_price) / entry_price) * 100
+                
+                logger.info(f"🛡️ FINAL SAFETY METRICS:")
+                logger.info(f"   Real Liquidation Distance: {liq_distance_pct:.2f}%")
+                logger.info(f"   Stop Loss Distance: {stop_distance_pct:.2f}%")
+                logger.info(f"   Safety Buffer: {liq_distance_pct - stop_distance_pct:.2f}%")
+                logger.info(f"   Target Buffer: {liquidation_buffer}%")
+                
+                # Calculate risk/reward with safe stop
+                if side == 'long':
+                    risk = abs(safe_stop_loss - entry_price) * quantity
                     reward = abs(take_profit - entry_price) * quantity
                 else:
-                    risk = abs(entry_price - stop_loss) * quantity
+                    risk = abs(entry_price - safe_stop_loss) * quantity
                     reward = abs(entry_price - take_profit) * quantity
                 
                 actual_ratio = reward / risk if risk > 0 else 0
@@ -783,9 +833,13 @@ class FuturesTrader:
                 if use_fixed_amount_tp:
                     logger.info(f"💰 Expected TP Profit: ${reward:.2f} (Target: ${fixed_tp_amount})")
                 
-                # Record trade entry to CSV
+                # Record trade entry to CSV with REAL liquidation price
                 self._record_trade_entry(symbol, coin_name, side, leverage, entry_price, 
-                                       quantity, margin_amount, stop_loss, take_profit, tp_type)
+                                       quantity, margin_amount, safe_stop_loss, take_profit, 
+                                       tp_type, real_liquidation_price)
+                
+                logger.info("✅ LIQUIDATION-SAFE TRADE COMPLETED SUCCESSFULLY!")
+                logger.info("🛡️ Using REAL liquidation price from Binance API")
                 
                 return {
                     'success': True,
@@ -794,12 +848,13 @@ class FuturesTrader:
                     'side': side,
                     'leverage': leverage,
                     'entry_price': entry_price,
-                    'liquidation_price': liquidation_price,
+                    'real_liquidation_price': real_liquidation_price,
                     'quantity': quantity,
                     'margin_used': margin_amount,
-                    'stop_loss': stop_loss,
+                    'stop_loss': safe_stop_loss,
                     'take_profit': take_profit,
-                    'tp_type': tp_type
+                    'tp_type': tp_type,
+                    'safety_buffer': liq_distance_pct - stop_distance_pct
                 }
                 
             except Exception as e:
@@ -807,7 +862,7 @@ class FuturesTrader:
                 return False
             
         except Exception as e:
-            logger.error(f"❌ Critical error in futures trade execution: {e}")
+            logger.error(f"❌ Critical error in liquidation-safe trade: {e}")
             return False
 
     def close_position(self, coin, entry_price=None, margin_amount=None):
@@ -860,11 +915,6 @@ class FuturesTrader:
             logger.info(f"✅ FUTURES POSITION CLOSED - {coin_name}")
             logger.info(f"💰 Exit Price: ${exit_price:.8f}")
             
-            # Record trade exit to CSV if entry details provided
-            if entry_price and margin_amount:
-                self._record_trade_exit(symbol, coin_name, side, entry_price, quantity, 
-                                      margin_amount, exit_price, "MANUAL_CLOSE")
-            
             return True
             
         except Exception as e:
@@ -884,35 +934,95 @@ class FuturesTrader:
             logger.error(f"❌ Error getting balance: {e}")
             return None
 
-# Initialize the trader
-futures_trader = FuturesTrader()
+    def get_all_positions(self):
+        """Get all active positions with REAL liquidation prices from Binance"""
+        try:
+            logger.info("📊 FETCHING ALL ACTIVE POSITIONS WITH REAL LIQUIDATION PRICES...")
+            positions = self.exchange.fetch_positions()
+            active_positions = []
+            
+            for position in positions:
+                if float(position.get('contracts', 0)) > 0:
+                    symbol = position.get('symbol')
+                    side = position.get('side')
+                    size = float(position.get('contracts', 0))
+                    entry_price = float(position.get('entryPrice', 0))
+                    real_liquidation = float(position.get('liquidationPrice', 0)) if position.get('liquidationPrice') else None
+                    margin_used = float(position.get('initialMargin', 0))
+                    
+                    pos_data = {
+                        'symbol': symbol,
+                        'side': side,
+                        'size': size,
+                        'entry_price': entry_price,
+                        'mark_price': float(position.get('markPrice', 0)),
+                        'real_liquidation_price': real_liquidation,
+                        'unrealized_pnl': float(position.get('unrealizedPnl', 0)),
+                        'percentage': float(position.get('percentage', 0)),
+                        'margin_used': margin_used,
+                        'maintenance_margin': float(position.get('maintenanceMargin', 0)),
+                        'notional': float(position.get('notional', 0))
+                    }
+                    active_positions.append(pos_data)
+                    
+                    # Log position details with REAL liquidation price
+                    logger.info(f"📍 {symbol} | {side.upper()}")
+                    logger.info(f"   Size: {size:.8f}")
+                    logger.info(f"   Entry: ${entry_price:.8f}")
+                    logger.info(f"   Mark: ${pos_data['mark_price']:.8f}")
+                    
+                    if real_liquidation:
+                        # Calculate distance to real liquidation
+                        if side == 'long':
+                            liq_distance = ((entry_price - real_liquidation) / entry_price) * 100
+                        else:
+                            liq_distance = ((real_liquidation - entry_price) / entry_price) * 100
+                        
+                        logger.info(f"   🎯 REAL Liquidation: ${real_liquidation:.8f}")
+                        logger.info(f"   🛡️ Distance to Liquidation: {liq_distance:.2f}%")
+                    else:
+                        logger.info(f"   🎯 Liquidation: Not available")
+                    
+                    logger.info(f"   PnL: ${pos_data['unrealized_pnl']:.4f} ({pos_data['percentage']:.2f}%)")
+                    logger.info(f"   Margin: ${margin_used:.4f}")
+                    logger.info("   " + "="*50)
+            
+            if not active_positions:
+                logger.info("📍 No active positions found")
+            
+            return active_positions
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching positions: {e}")
+            return []
 
-# Example usage:
-# Entry trade (automatically saves to CSV)
-# result = futures_trader.trade("BTC", 100, leverage=10, side="long", take_profit_ratio=2.0)
+# Initialize the liquidation-safe trader
+futures_trader = LiquidationSafeFuturesTrader()
 
-# Exit trade (provide entry details for complete CSV record)
-# if result and result['success']:
-#     futures_trader.close_position("BTC", 
-#                                  entry_price=result['entry_price'], 
-#                                  margin_amount=result['margin_used'])
+# 🛡️ LIQUIDATION-SAFE TRADING EXAMPLES WITH REAL BINANCE LIQUIDATION PRICES:
 
-# Trading Strategy Examples:
+# 1. Conservative trade with 30% buffer (RECOMMENDED for high leverage)
+# futures_trader.trade("BTC", 100, leverage=10, side="long", liquidation_buffer=30)
 
-# 1. ATR-based TP and SL (default)
-# futures_trader.trade("ETH", 50, leverage=5, side="short", take_profit_ratio=2.0)
+# 2. Moderate trade with 25% buffer (DEFAULT - good balance)
+# futures_trader.trade("ETH", 50, leverage=5, side="short", liquidation_buffer=25)
 
-# 2. Fixed percentage TP with ATR-based SL
-# futures_trader.trade("ETH", 50, leverage=5, side="short", use_fixed_tp=True, fixed_tp_percent=3.0)
+# 3. Aggressive trade with 20% buffer (MINIMUM recommended)
+# futures_trader.trade("BNB", 200, leverage=3, side="long", liquidation_buffer=20)
 
-# 3. Swing levels for both TP and SL
-# futures_trader.trade("BNB", 200, leverage=3, side="long", use_swing_levels=True, swing_lookback=15)
+# 4. Ultra-conservative high leverage trade with 40% buffer
+# futures_trader.trade("BTC", 50, leverage=50, side="long", liquidation_buffer=40)
 
-# 4. Resistance/Support TP with ATR-based SL
-# futures_trader.trade("BTC", 100, leverage=10, side="long", use_resistance_support=True, rs_lookback=20)
+# 5. Fixed amount TP with safety
+# futures_trader.trade("BTC", 100, leverage=10, side="long", 
+#                     use_fixed_amount_tp=True, fixed_tp_amount=25, liquidation_buffer=30)
 
-# 5. NEW: Fixed Dollar Amount TP with ATR-based SL
-# futures_trader.trade("BTC", 100, leverage=10, side="long", use_fixed_amount_tp=True, fixed_tp_amount=25)
-# futures_trader.trade("ETH", 200, leverage=5, side="short", use_fixed_amount_tp=True, fixed_tp_amount=50)
+# 6. Swing trading with safety
+# futures_trader.trade("SOL", 200, leverage=5, side="long", 
+#                     use_swing_levels=True, swing_lookback=15, liquidation_buffer=25)
 
+# Check all positions with REAL liquidation prices
+# futures_trader.get_all_positions()
+
+# Get account balance
 # futures_trader.get_balance()

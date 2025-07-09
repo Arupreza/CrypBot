@@ -129,8 +129,7 @@ class SmartMoneyScanner:
     
     def identify_fair_value_gaps(self, df):
         """
-        Identify Fair Value Gaps (FVG) - gaps in price action
-        (Same logic for both spot and perpetual)
+        IMPROVED: Identify Fair Value Gaps with proper invalidation tracking
         """
         fvgs = []
         
@@ -153,8 +152,10 @@ class SmartMoneyScanner:
                     'size_percentage': gap_percentage,
                     'volume_confirmation': current_candle['volume'] > df['volume'].rolling(20).mean().iloc[i],
                     'candle_index': i,
-                    'filled': False,
-                    'partially_filled': False
+                    'status': 'active',  # NEW: Track FVG status
+                    'invalidated_at': None,
+                    'invalidation_reason': None,
+                    'fill_percentage': 0.0
                 })
             
             # Bearish FVG: prev_low > next_high (gap down)
@@ -171,46 +172,127 @@ class SmartMoneyScanner:
                     'size_percentage': gap_percentage,
                     'volume_confirmation': current_candle['volume'] > df['volume'].rolling(20).mean().iloc[i],
                     'candle_index': i,
-                    'filled': False,
-                    'partially_filled': False
+                    'status': 'active',  # NEW: Track FVG status
+                    'invalidated_at': None,
+                    'invalidation_reason': None,
+                    'fill_percentage': 0.0
                 })
         
-        # Check if FVGs are filled or partially filled by subsequent price action
+        # IMPROVED: Check for FVG invalidation with proper logic
         for fvg in fvgs:
-            fvg_index = fvg['candle_index']
-            subsequent_candles = df.iloc[fvg_index+1:]
-            
-            for j, candle in subsequent_candles.iterrows():
-                if fvg['type'] == 'bullish_fvg':
-                    if candle['low'] <= fvg['upper'] and candle['high'] >= fvg['lower']:
-                        if candle['low'] <= fvg['lower']:
-                            fvg['filled'] = True
-                        else:
-                            fvg['partially_filled'] = True
-                        break
-                        
-                elif fvg['type'] == 'bearish_fvg':
-                    if candle['high'] >= fvg['lower'] and candle['low'] <= fvg['upper']:
-                        if candle['high'] >= fvg['upper']:
-                            fvg['filled'] = True
-                        else:
-                            fvg['partially_filled'] = True
-                        break
+            if fvg['status'] == 'active':  # Only check active FVGs
+                fvg_index = fvg['candle_index']
+                subsequent_candles = df.iloc[fvg_index+1:]
+                
+                for j, candle in subsequent_candles.iterrows():
+                    invalidated = False
+                    
+                    if fvg['type'] == 'bullish_fvg':
+                        # Bullish FVG invalidation conditions
+                        if candle['low'] <= fvg['upper']:  # Price touches or enters FVG
+                            
+                            # Calculate fill percentage
+                            if candle['low'] <= fvg['lower']:
+                                # Completely filled - INVALIDATED
+                                fvg['fill_percentage'] = 100.0
+                                fvg['status'] = 'invalidated'
+                                fvg['invalidation_reason'] = 'completely_filled'
+                                invalidated = True
+                            else:
+                                # Partially filled
+                                fill_level = (fvg['upper'] - candle['low']) / (fvg['upper'] - fvg['lower'])
+                                fvg['fill_percentage'] = fill_level * 100
+                                
+                                # Invalidate if filled more than 70% (more conservative)
+                                if fvg['fill_percentage'] > 70:
+                                    fvg['status'] = 'invalidated'
+                                    fvg['invalidation_reason'] = 'partially_filled_>70%'
+                                    invalidated = True
+                                else:
+                                    fvg['status'] = 'partially_filled'
+                            
+                            if invalidated:
+                                fvg['invalidated_at'] = j
+                                break
+                    
+                    elif fvg['type'] == 'bearish_fvg':
+                        # Bearish FVG invalidation conditions
+                        if candle['high'] >= fvg['lower']:  # Price touches or enters FVG
+                            
+                            # Calculate fill percentage
+                            if candle['high'] >= fvg['upper']:
+                                # Completely filled - INVALIDATED
+                                fvg['fill_percentage'] = 100.0
+                                fvg['status'] = 'invalidated'
+                                fvg['invalidation_reason'] = 'completely_filled'
+                                invalidated = True
+                            else:
+                                # Partially filled
+                                fill_level = (candle['high'] - fvg['lower']) / (fvg['upper'] - fvg['lower'])
+                                fvg['fill_percentage'] = fill_level * 100
+                                
+                                # Invalidate if filled more than 70% (more conservative)
+                                if fvg['fill_percentage'] > 70:
+                                    fvg['status'] = 'invalidated'
+                                    fvg['invalidation_reason'] = 'partially_filled_>70%'
+                                    invalidated = True
+                                else:
+                                    fvg['status'] = 'partially_filled'
+                            
+                            if invalidated:
+                                fvg['invalidated_at'] = j
+                                break
         
         return fvgs
     
     def check_current_price_in_fvg(self, df, fvgs):
         """
-        Check if current price is trading within any Fair Value Gap
+        IMPROVED: Check if current price is in FVG with proper invalidation handling
         """
         if not fvgs or len(df) == 0:
             return {'in_fvg': False, 'fvg_details': None}
         
         current_price = df['close'].iloc[-1]
-        recent_fvgs = [fvg for fvg in fvgs if not fvg['filled'] and 
-                       len(df) - fvg['candle_index'] <= 50]
+        current_candle = df.iloc[-1]
         
-        for fvg in recent_fvgs:
+        # IMPROVED: Only consider ACTIVE FVGs (not invalidated)
+        active_fvgs = [fvg for fvg in fvgs if 
+                       fvg['status'] == 'active' and  # Only active FVGs
+                       len(df) - fvg['candle_index'] <= 50]  # Recent FVGs
+        
+        for fvg in active_fvgs:
+            # IMPROVED: Check if current price would invalidate this FVG
+            would_invalidate = False
+            
+            if fvg['type'] == 'bullish_fvg':
+                if current_candle['low'] <= fvg['upper']:
+                    # Price is touching/entering the FVG
+                    if current_candle['low'] <= fvg['lower']:
+                        # Would completely fill - FVG is invalidated
+                        would_invalidate = True
+                    else:
+                        # Partially in FVG - check if too much filled
+                        fill_level = (fvg['upper'] - current_candle['low']) / (fvg['upper'] - fvg['lower'])
+                        if fill_level > 0.7:  # More than 70% filled
+                            would_invalidate = True
+            
+            elif fvg['type'] == 'bearish_fvg':
+                if current_candle['high'] >= fvg['lower']:
+                    # Price is touching/entering the FVG
+                    if current_candle['high'] >= fvg['upper']:
+                        # Would completely fill - FVG is invalidated
+                        would_invalidate = True
+                    else:
+                        # Partially in FVG - check if too much filled
+                        fill_level = (current_candle['high'] - fvg['lower']) / (fvg['upper'] - fvg['lower'])
+                        if fill_level > 0.7:  # More than 70% filled
+                            would_invalidate = True
+            
+            # Skip invalidated FVGs
+            if would_invalidate:
+                continue
+            
+            # If we reach here, FVG is still valid and tradeable
             if fvg['lower'] <= current_price <= fvg['upper']:
                 fvg_range = fvg['upper'] - fvg['lower']
                 position_in_fvg = (current_price - fvg['lower']) / fvg_range
@@ -234,6 +316,7 @@ class SmartMoneyScanner:
                         'fill_percentage': round(fill_percentage, 2),
                         'volume_confirmation': fvg['volume_confirmation'],
                         'age_candles': len(df) - fvg['candle_index'],
+                        'fvg_status': fvg['status'],  # NEW: Show FVG status
                         'trade_signal': self._generate_fvg_trade_signal(fvg, current_price, position_in_fvg)
                     }
                 }
@@ -286,9 +369,9 @@ class SmartMoneyScanner:
         
         return signal
     
-    def scan_fvg_opportunities(self, coin_list, timeframe='4h', min_gap_size=0.5):
+    def scan_fvg_opportunities(self, coin_list, timeframe='15m', min_gap_size=0.3):
         """
-        Scan for coins currently trading in Fair Value Gaps with trade signals
+        IMPROVED: Scan for coins with proper FVG invalidation logic
         """
         fvg_opportunities = []
         
@@ -303,17 +386,20 @@ class SmartMoneyScanner:
                 if df is None or len(df) < 100:
                     continue
                 
-                # Identify Fair Value Gaps
+                # IMPROVED: Identify Fair Value Gaps with invalidation tracking
                 fvgs = self.identify_fair_value_gaps(df)
                 if not fvgs:
                     continue
                 
-                # Filter FVGs by minimum size
-                significant_fvgs = [fvg for fvg in fvgs if fvg['size_percentage'] >= min_gap_size]
+                # Filter FVGs by minimum size AND only active status
+                significant_fvgs = [fvg for fvg in fvgs if 
+                                   fvg['size_percentage'] >= min_gap_size and
+                                   fvg['status'] == 'active']  # NEW: Only active FVGs
+                
                 if not significant_fvgs:
                     continue
                 
-                # Check if current price is in any FVG
+                # IMPROVED: Check if current price is in any ACTIVE FVG
                 fvg_analysis = self.check_current_price_in_fvg(df, significant_fvgs)
                 
                 if fvg_analysis['in_fvg']:
@@ -346,6 +432,7 @@ class SmartMoneyScanner:
                         'volume_confirmation': fvg_details['volume_confirmation'],
                         'current_volume_ratio': round(volume_ratio, 2),
                         'funding_rate': market_info.get('funding_rate', 'N/A'),
+                        'fvg_status': fvg_details['fvg_status'],
                         'fvg_timestamp': fvg_details['timestamp'],
                         'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
@@ -400,96 +487,162 @@ class SmartMoneyScanner:
         
         return short_signals.sort_values('composite_score', ascending=False)
 
-# Quick access functions with market type option
-def quick_fvg_scan(coins, timeframe='15m', min_gap_size=0.3, market_type='spot'):
-    """Quick FVG scan that returns DataFrame"""
-    scanner = SmartMoneyScanner('binance', market_type=market_type)
-    return scanner.scan_fvg_opportunities(coins, timeframe, min_gap_size)
+# ================================================
+# ESSENTIAL FUNCTIONS ONLY - LONG, SHORT, SPOT
+# ================================================
 
-def quick_long_signals(coins, timeframe='15m', min_rr=1.5, min_conf='medium', market_type='spot'):
-    """Quick scan for long FVG signals"""
-    scanner = SmartMoneyScanner('binance', market_type=market_type)
-    fvg_df = scanner.scan_fvg_opportunities(coins, timeframe)
-    return scanner.get_fvg_long_signals(fvg_df, min_confidence=min_conf, min_risk_reward=min_rr)
-
-def quick_short_signals(coins, timeframe='15m', min_rr=1.5, min_conf='medium', market_type='spot'):
-    """Quick scan for short FVG signals"""
-    scanner = SmartMoneyScanner('binance', market_type=market_type)
-    fvg_df = scanner.scan_fvg_opportunities(coins, timeframe)  
-    return scanner.get_fvg_short_signals(fvg_df, min_confidence=min_conf, min_risk_reward=min_rr)
-
-def get_fvg_dataframe(coins, timeframe='15m', min_gap_size=0.3, min_confidence='medium', 
-                      min_risk_reward=1.5, market_type='spot'):
+def get_long_signals(coins, timeframe='15m', market_type='spot'):
     """
-    Get FVG opportunities as organized DataFrames
+    Get long trading signals
     
     Args:
-        market_type (str): 'spot' or 'future' (perpetual contracts)
+        coins: List of coins ['BTCUSDT', 'ETHUSDT']
+        timeframe: '1m', '5m', '15m', '1h', '4h', '1d'
+        market_type: 'spot' or 'future'
+    
+    Returns:
+        DataFrame with long signals
     """
-    try:
-        scanner = SmartMoneyScanner('binance', market_type=market_type)
-        fvg_df = scanner.scan_fvg_opportunities(coins, timeframe, min_gap_size)
-        
-        if fvg_df.empty:
-            return {
-                'all_fvg': pd.DataFrame(),
-                'long_signals': pd.DataFrame(), 
-                'short_signals': pd.DataFrame()
-            }
-        
-        long_signals = scanner.get_fvg_long_signals(fvg_df, min_confidence, min_risk_reward)
-        short_signals = scanner.get_fvg_short_signals(fvg_df, min_confidence, min_risk_reward)
-        
-        return {
-            'all_fvg': fvg_df,
-            'long_signals': long_signals,
-            'short_signals': short_signals
-        }
-        
-    except Exception as e:
-        print(f"Error getting FVG DataFrame: {e}")
-        return {
-            'all_fvg': pd.DataFrame(),
-            'long_signals': pd.DataFrame(),
-            'short_signals': pd.DataFrame()
-        }
+    scanner = SmartMoneyScanner('binance', market_type=market_type)
+    fvg_df = scanner.scan_fvg_opportunities(coins, timeframe)
+    return scanner.get_fvg_long_signals(fvg_df, min_confidence='medium', min_risk_reward=1.5)
 
-def compare_spot_vs_perpetual(coins, timeframe='4h'):
+def get_short_signals(coins, timeframe='15m', market_type='future'):
     """
-    Compare FVG opportunities between spot and perpetual markets
+    Get short trading signals (works best with perpetual contracts)
+    
+    Args:
+        coins: List of coins ['BTCUSDT', 'ETHUSDT']
+        timeframe: '1m', '5m', '15m', '1h', '4h', '1d'
+        market_type: 'spot' or 'future' (recommend 'future' for shorts)
+    
+    Returns:
+        DataFrame with short signals
     """
-    print("🔍 COMPARING SPOT vs PERPETUAL CONTRACTS")
-    print("="*60)
+    scanner = SmartMoneyScanner('binance', market_type=market_type)
+    fvg_df = scanner.scan_fvg_opportunities(coins, timeframe)
+    return scanner.get_fvg_short_signals(fvg_df, min_confidence='medium', min_risk_reward=1.5)
+
+def get_spot_signals(coins, timeframe='15m'):
+    """
+    Get spot trading signals (long only)
     
-    # Scan spot market
-    print("\n📊 Scanning SPOT market...")
-    spot_data = get_fvg_dataframe(coins, timeframe, market_type='spot')
+    Args:
+        coins: List of coins ['BTCUSDT', 'ETHUSDT']
+        timeframe: '1m', '5m', '15m', '1h', '4h', '1d'
     
-    # Scan perpetual market
-    print("\n📊 Scanning PERPETUAL market...")
-    perp_data = get_fvg_dataframe(coins, timeframe, market_type='future')
+    Returns:
+        DataFrame with spot long signals
+    """
+    scanner = SmartMoneyScanner('binance', market_type='spot')
+    fvg_df = scanner.scan_fvg_opportunities(coins, timeframe)
+    return scanner.get_fvg_long_signals(fvg_df, min_confidence='medium', min_risk_reward=1.5)
+
+def quick_scan(coins=None, timeframe='15m'):
+    """
+    Quick scan for all trading opportunities
     
-    # Compare results
-    print(f"\n📈 RESULTS COMPARISON:")
-    print(f"SPOT - Total FVG opportunities: {len(spot_data['all_fvg'])}")
-    print(f"SPOT - Long signals: {len(spot_data['long_signals'])}")
-    print(f"SPOT - Short signals: {len(spot_data['short_signals'])}")
+    Args:
+        coins: List of coins (default: top 5 coins)
+        timeframe: Timeframe to scan (default: 15m)
     
-    print(f"\nPERPETUAL - Total FVG opportunities: {len(perp_data['all_fvg'])}")
-    print(f"PERPETUAL - Long signals: {len(perp_data['long_signals'])}")
-    print(f"PERPETUAL - Short signals: {len(perp_data['short_signals'])}")
+    Returns:
+        dict with all signal types
+    """
+    
+    # Default coins if none provided
+    if coins is None:
+        coins = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'SOLUSDT']
+    
+    print(f"⚡ QUICK FVG SCAN")
+    print(f"🪙 Coins: {', '.join(coins)}")
+    print(f"⏰ Timeframe: {timeframe}")
+    print("=" * 40)
+    
+    # Get all signals
+    spot_longs = get_spot_signals(coins, timeframe)
+    perp_longs = get_long_signals(coins, timeframe, market_type='future')
+    perp_shorts = get_short_signals(coins, timeframe, market_type='future')
+    
+    total_signals = len(spot_longs) + len(perp_longs) + len(perp_shorts)
+    
+    print(f"✅ Total signals found: {total_signals}")
+    print(f"   📈 Spot longs: {len(spot_longs)}")
+    print(f"   📈 Perpetual longs: {len(perp_longs)}")
+    print(f"   📉 Perpetual shorts: {len(perp_shorts)}")
+    
+    # Show best opportunities
+    all_signals = []
+    
+    # Add spot longs
+    for _, signal in spot_longs.iterrows():
+        all_signals.append({
+            'symbol': signal['symbol'],
+            'type': 'SPOT LONG',
+            'price': signal['current_price'],
+            'risk_reward': signal['risk_reward'],
+            'confidence': signal['confidence'],
+            'entry': signal['entry_zone'],
+            'target': signal['target'],
+            'stop': signal['stop_loss']
+        })
+    
+    # Add perp longs
+    for _, signal in perp_longs.iterrows():
+        all_signals.append({
+            'symbol': signal['symbol'],
+            'type': 'PERP LONG',
+            'price': signal['current_price'],
+            'risk_reward': signal['risk_reward'],
+            'confidence': signal['confidence'],
+            'entry': signal['entry_zone'],
+            'target': signal['target'],
+            'stop': signal['stop_loss']
+        })
+    
+    # Add perp shorts
+    for _, signal in perp_shorts.iterrows():
+        all_signals.append({
+            'symbol': signal['symbol'],
+            'type': 'PERP SHORT',
+            'price': signal['current_price'],
+            'risk_reward': signal['risk_reward'],
+            'confidence': signal['confidence'],
+            'entry': signal['entry_zone'],
+            'target': signal['target'],
+            'stop': signal['stop_loss']
+        })
+    
+    # Sort by risk/reward ratio
+    all_signals.sort(key=lambda x: x['risk_reward'], reverse=True)
+    
+    if all_signals:
+        print(f"\n🏆 TOP OPPORTUNITIES (sorted by R/R):")
+        print("-" * 50)
+        
+        for i, signal in enumerate(all_signals[:10], 1):  # Show top 10
+            print(f"{i}. {signal['type']} - {signal['symbol']}")
+            print(f"   💰 Price: ${signal['price']:.4f}")
+            print(f"   🎯 Entry: {signal['entry']}")
+            print(f"   🚀 Target: ${signal['target']:.4f}")
+            print(f"   ⛔ Stop: ${signal['stop']:.4f}")
+            print(f"   ⚖️ R/R: {signal['risk_reward']}")
+            print(f"   🔥 Confidence: {signal['confidence']}")
+            print()
+    else:
+        print("❌ No opportunities found")
+        print("💡 Try different timeframe or coins")
     
     return {
-        'spot': spot_data,
-        'perpetual': perp_data
+        'spot_longs': spot_longs,
+        'perp_longs': perp_longs,
+        'perp_shorts': perp_shorts,
+        'total_count': total_signals
     }
     
-# # Spot market signals
-# spot_fvg = quick_fvg_scan(coins, timeframe='4h', market_type='spot')
-# spot_longs = quick_long_signals(coins, market_type='spot')
-# spot_shorts = quick_short_signals(coins, market_type='spot')
 
-# # Perpetual market signals
-# perp_fvg = quick_fvg_scan(coins, timeframe='4h', market_type='future')
-# perp_longs = quick_long_signals(coins, market_type='future')
-# perp_shorts = quick_short_signals(coins, market_type='future')
+#spot_longs = get_spot_signals(my_coins, timeframe='15m')
+
+#perp_longs = get_long_signals(my_coins, timeframe='15m', market_type='future')
+
+#perp_shorts = get_short_signals(my_coins, timeframe='15m', market_type='future')

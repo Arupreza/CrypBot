@@ -542,5 +542,3 @@ def scan_top_volume_pairs(scanner, quote_currency='USDT', top_n=20, timeframe='4
         print(f"Error getting top volume pairs: {e}")
         return pd.DataFrame()
 
-if __name__ == "__main__":
-    main()
