@@ -1,0 +1,2 @@
+Date,Time,Action,Coin,Symbol,Side,Leverage,Entry_Price,Quantity,Notional_USD,Margin_Used,Stop_Loss,Take_Profit,TP_Type,Exit_Price,Exit_Time,PnL_USD,PnL_Percent,Exit_Reason,Trade_Duration_Minutes,Expected_TP_Profit
+2025-07-09,16:40:56,ENTRY,LISTA,LISTAUSDT,long,50,0.2072,2415.45893719,500.483091785768,10,0.20079,0.21941999999999998,ATR-based (1:2.0),,,,,,,29.516908212461754
