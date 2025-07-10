@@ -203,7 +203,7 @@ class RealTimeTradeTracker:
         self.ax1 = None
         self.ax2 = None
         self.ax3 = None
-        self.ax4 = None  # New axis for liquidation tracking
+        # Removed ax4 - no longer needed for liquidation distance graph
         self.lines = {}
         self.hlines = {}
         self.bars = None
@@ -214,9 +214,7 @@ class RealTimeTradeTracker:
         self.btc_chandelier_data = None
         self.update_count = 0
         self.liquidation_price = None
-        self.liquidation_distance_history = []
-        self.current_price_history = []
-        self.time_history = []
+        # Removed liquidation distance history tracking as it's no longer displayed
         
         # Initialize Binance connection for live position tracking
         self.exchange = None
@@ -364,25 +362,6 @@ class RealTimeTradeTracker:
             if ticker:
                 self.current_price = ticker['last']
                 
-                # Calculate liquidation distance
-                liquidation_distance = self.get_liquidation_distance_percent(
-                    self.current_price, 
-                    self.liquidation_price, 
-                    self.trade_data['side']
-                )
-                
-                # Store for history tracking
-                current_time = datetime.now()
-                self.liquidation_distance_history.append(liquidation_distance)
-                self.current_price_history.append(self.current_price)
-                self.time_history.append(current_time)
-                
-                # Keep only last 100 points for performance
-                if len(self.liquidation_distance_history) > 100:
-                    self.liquidation_distance_history = self.liquidation_distance_history[-100:]
-                    self.current_price_history = self.current_price_history[-100:]
-                    self.time_history = self.time_history[-100:]
-                
                 # Fetch historical data
                 ohlcv = self.fetcher.get_klines(formatted_symbol, '1h', 100)
                 if ohlcv:
@@ -408,10 +387,11 @@ class RealTimeTradeTracker:
             return False
     
     def setup_plot(self):
-        """Setup the initial plot structure"""
+        """Setup the initial plot structure - now with 3 subplots in one column"""
         plt.style.use('dark_background')
         
-        self.fig, ((self.ax1, self.ax2), (self.ax3, self.ax4)) = plt.subplots(2, 2, figsize=(20, 14))
+        # 3 subplots in a single column (vertical stack)
+        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(16, 18))
         
         self.fig.suptitle(f'{self.trade_data["symbol"]} - {self.trade_data["side"].upper()} {self.trade_data["leverage"]}x Real-Time Trade Tracker', 
                          fontsize=18, fontweight='bold', color='white')
@@ -434,27 +414,9 @@ class RealTimeTradeTracker:
         self.ax3.grid(True, alpha=0.3)
         self.ax3.axhline(y=0, color='white', linewidth=0.5)
         
-        # Setup Liquidation Distance chart
-        self.ax4.set_ylabel('Distance to Liquidation (%) / Price ($)', fontsize=12, fontweight='bold')
-        self.ax4.set_xlabel('Time', fontsize=12)
-        self.ax4.set_title('🛡️ Liquidation Distance & Current Price Monitor', fontsize=12)
-        self.ax4.grid(True, alpha=0.3)
-        
-        # Create twin axis for current price
-        self.ax4_twin = self.ax4.twinx()
-        self.ax4_twin.set_ylabel('Current Price ($)', fontsize=24, fontweight='bold', color='yellow')
-        
-        # Add danger zones to left axis
-        self.ax4.axhline(y=15, color='green', linestyle='--', alpha=0.5, label='Safe Zone (>15%)')
-        self.ax4.axhline(y=10, color='yellow', linestyle='--', alpha=0.5, label='Caution Zone (>10%)')
-        self.ax4.axhline(y=5, color='orange', linestyle='--', alpha=0.5, label='Warning Zone (>5%)')
-        self.ax4.axhspan(0, 5, color='red', alpha=0.2, label='Danger Zone (<5%)')
-        
         # Initialize empty lines
         self.lines['price'], = self.ax1.plot([], [], color='#00ff41', linewidth=2.5, label=f'{self.trade_data["symbol"]} Price')
         self.lines['btc'], = self.ax2.plot([], [], color='#F7931A', linewidth=2.5, label='BTC Price')
-        self.lines['liquidation_distance'], = self.ax4.plot([], [], color='cyan', linewidth=3, label='Distance to Liquidation (%)')
-        self.lines['current_price_line'], = self.ax4_twin.plot([], [], color='yellow', linewidth=2, label='Current Price ($)', alpha=0.8)
         
         # Add horizontal lines for trade levels
         self.hlines['entry'] = self.ax1.axhline(y=self.trade_data['entry_price'], color='blue', linestyle='--', 
@@ -473,19 +435,12 @@ class RealTimeTradeTracker:
                                                      linewidth=3, label=f'Liquidation: ${self.liquidation_price:.6f}', alpha=0.9)
         
         # Add legends with bigger font size
-        self.ax1.legend(loc='upper left', fontsize=24, framealpha=0.9, markerscale=1.5)
-        self.ax2.legend(loc='upper left', fontsize=24, framealpha=0.9, markerscale=1.5)
-        
-        # Combine legends for liquidation chart
-        lines1, labels1 = self.ax4.get_legend_handles_labels()
-        lines2, labels2 = self.ax4_twin.get_legend_handles_labels()
-        self.ax4.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=24, framealpha=0.9, markerscale=1.5)
+        self.ax1.legend(loc='upper left', fontsize=18, framealpha=0.9, markerscale=1.5)
+        self.ax2.legend(loc='upper left', fontsize=18, framealpha=0.9, markerscale=1.5)
         
         # Format axes
         self.ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.6f}'))
         self.ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-        self.ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}%'))
-        self.ax4_twin.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.4f}'))
         
         plt.tight_layout()
         
@@ -540,31 +495,7 @@ class RealTimeTradeTracker:
             self.ax3.grid(True, alpha=0.3)
             self.ax3.axhline(y=0, color='white', linewidth=0.5)
             
-        # Update liquidation distance chart
-        if len(self.liquidation_distance_history) > 1:
-            # Update liquidation distance line (left axis)
-            self.lines['liquidation_distance'].set_data(self.time_history, self.liquidation_distance_history)
-            
-            # Update current price line (right axis)
-            self.lines['current_price_line'].set_data(self.time_history, self.current_price_history)
-            
-            # Auto-scale left axis (liquidation distance) with minimum of 25% for better visibility
-            distance_min = min(self.liquidation_distance_history + [0])
-            distance_max = max(self.liquidation_distance_history + [25])
-            self.ax4.set_ylim(distance_min - 1, distance_max + 2)
-            
-            # Auto-scale right axis (current price)
-            if self.current_price_history:
-                price_min = min(self.current_price_history)
-                price_max = max(self.current_price_history)
-                price_padding = (price_max - price_min) * 0.1 if price_max != price_min else price_max * 0.01
-                self.ax4_twin.set_ylim(price_min - price_padding, price_max + price_padding)
-            
-            # Set x-axis for both
-            self.ax4.set_xlim(min(self.time_history), max(self.time_history))
-            self.ax4_twin.set_xlim(min(self.time_history), max(self.time_history))
-            
-        # Update title with current stats including liquidation info
+        # Update title with current stats including liquidation info in title
         if self.current_price:
             price_change = ((self.current_price - self.trade_data['entry_price']) / self.trade_data['entry_price']) * 100
             if self.trade_data['side'].lower() == 'long':
@@ -572,7 +503,7 @@ class RealTimeTradeTracker:
             else:
                 pnl_percent = -price_change * self.trade_data['leverage']
             
-            # Get liquidation status
+            # Get liquidation status for title display
             liquidation_distance = self.get_liquidation_distance_percent(
                 self.current_price, 
                 self.liquidation_price, 
@@ -597,10 +528,10 @@ class RealTimeTradeTracker:
                 self.hlines['liquidation'].set_color('red')
                 self.hlines['liquidation'].set_alpha(0.7)
         
-        # Redraw legend with updated current price and bigger font
-        self.ax1.legend(loc='upper left', fontsize=24, framealpha=0.9, markerscale=1.5)
+        # Redraw legend with updated current price
+        self.ax1.legend(loc='upper left', fontsize=18, framealpha=0.9, markerscale=1.5)
         
-        return [self.lines['price'], self.lines['btc'], self.lines['liquidation_distance'], self.lines['current_price_line']]
+        return [self.lines['price'], self.lines['btc']]
     
     def start_tracking(self, update_interval=5000):  # 5 seconds
         """Start real-time tracking"""
@@ -643,7 +574,7 @@ class RealTimeTradeTracker:
 
 def track_perpetual_trade_realtime(CSV_PATH, update_interval=5):
     """
-    Start real-time perpetual trade tracking with liquidation monitoring
+    Start real-time perpetual trade tracking (without liquidation distance graph)
     
     Args:
         csv_path (str): Path to your trades CSV file
@@ -655,7 +586,7 @@ def track_perpetual_trade_realtime(CSV_PATH, update_interval=5):
 # Alternative function for single update (non-real-time)
 def display_trade_snapshot(csv_file_path=None):
     """
-    Display a single snapshot of the trade with liquidation info (non-updating version)
+    Display a single snapshot of the trade (non-updating version)
     Can work with CSV file or live Binance API data
     """
     tracker = RealTimeTradeTracker(csv_file_path if csv_file_path else "dummy.csv")
@@ -713,10 +644,10 @@ def display_trade_snapshot(csv_file_path=None):
         print("❌ Could not fetch live market data")
 
 # Usage examples:
-# For real-time tracking with liquidation monitoring: 
+# For real-time tracking (without liquidation distance graph): 
 # track_perpetual_trade_realtime('your_trades.csv', update_interval=5)
 
-# For single snapshot with liquidation info using CSV: 
+# For single snapshot using CSV: 
 # display_trade_snapshot('your_trades.csv')
 
 # For single snapshot using live Binance API data (no CSV needed):
