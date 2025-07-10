@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 import math
 import requests
 from typing import Dict
+import threading
+import json
+from dataclasses import dataclass
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,6 +21,24 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
+
+@dataclass
+class ActiveTrade:
+    """Data class to track active trades"""
+    symbol: str
+    coin_name: str
+    side: str
+    entry_price: float
+    quantity: float
+    margin_used: float
+    stop_loss: float
+    take_profit: float
+    tp_type: str
+    liquidation_price: float
+    leverage: int
+    entry_time: datetime
+    trade_id: str
+    status: str = "ACTIVE"
 
 class BinancePerpetualFetcher:
     def __init__(self):
@@ -220,9 +241,9 @@ class BinancePerpetualFetcher:
             logger.error(f"❌ Error fetching position info: {e}")
             return {}
 
-class LiquidationSafeFuturesTrader:
+class SelfMonitoringFuturesTrader:
     def __init__(self, reports_folder_path="./futures_reports/"):
-        """Initialize liquidation-safe futures trader"""
+        """Initialize self-monitoring liquidation-safe futures trader"""
         self.perpetual_fetcher = BinancePerpetualFetcher()
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -249,6 +270,12 @@ class LiquidationSafeFuturesTrader:
         self.timeframe = '15m'
         self.reports_folder = reports_folder_path
         self._create_reports_folder()
+        
+        # Active trades tracking
+        self.active_trades = {}  # trade_id -> ActiveTrade
+        self.monitoring_active = False
+        self.monitoring_thread = None
+        self.monitoring_interval = 3  # Check every 3 seconds
         
         # Binance maintenance margin rates by position size (USDT)
         self.maintenance_margin_tiers = {
@@ -279,9 +306,153 @@ class LiquidationSafeFuturesTrader:
             ]
         }
         
-        logger.info("🛡️ LIQUIDATION-SAFE Futures Trader Ready!")
+        # Start monitoring immediately
+        self.start_monitoring()
+        
+        logger.info("🤖 SELF-MONITORING Liquidation-Safe Futures Trader Ready!")
         logger.info(f"📊 Reports will be saved to: {self.reports_folder}")
+        logger.info(f"👁️ Monitoring active trades every {self.monitoring_interval} seconds")
     
+    def start_monitoring(self):
+        """Start the monitoring thread"""
+        if not self.monitoring_active:
+            self.monitoring_active = True
+            self.monitoring_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+            self.monitoring_thread.start()
+            logger.info("👁️ Trade monitoring started")
+
+    def stop_monitoring(self):
+        """Stop the monitoring thread"""
+        if self.monitoring_active:
+            self.monitoring_active = False
+            if self.monitoring_thread:
+                self.monitoring_thread.join()
+            logger.info("🛑 Trade monitoring stopped")
+
+    def _monitoring_loop(self):
+        """Main monitoring loop that runs continuously"""
+        logger.info("🔄 Monitoring loop started - checking trades every few seconds...")
+        
+        while self.monitoring_active:
+            try:
+                if self.active_trades:
+                    self._check_all_trades()
+                time.sleep(self.monitoring_interval)
+            except Exception as e:
+                logger.error(f"❌ Error in monitoring loop: {e}")
+                time.sleep(self.monitoring_interval)
+
+    def _check_all_trades(self):
+        """Check all active trades for stop loss or take profit triggers"""
+        trades_to_remove = []
+        
+        for trade_id, trade in self.active_trades.items():
+            try:
+                # Get current price
+                current_price = self.perpetual_fetcher.get_current_price(trade.symbol)
+                if current_price <= 0:
+                    continue
+                
+                # Check if position still exists
+                position_info = self.perpetual_fetcher.get_position_info(trade.symbol)
+                position_size = position_info.get('positionAmt', 0) if position_info else 0
+                
+                # If no position exists, mark trade as closed externally
+                if abs(position_size) < 0.001:  # Position closed externally
+                    logger.info(f"📊 Position {trade.symbol} closed externally")
+                    self._record_trade_exit(trade, current_price, "EXTERNAL_CLOSE")
+                    trades_to_remove.append(trade_id)
+                    continue
+                
+                # Check stop loss trigger
+                if self._should_trigger_stop_loss(trade, current_price):
+                    logger.info(f"🚨 STOP LOSS TRIGGERED for {trade.symbol} at ${current_price:.8f}")
+                    if self._execute_exit_order(trade, "STOP_LOSS"):
+                        trades_to_remove.append(trade_id)
+                    continue
+                
+                # Check take profit trigger
+                if self._should_trigger_take_profit(trade, current_price):
+                    logger.info(f"🎯 TAKE PROFIT TRIGGERED for {trade.symbol} at ${current_price:.8f}")
+                    if self._execute_exit_order(trade, "TAKE_PROFIT"):
+                        trades_to_remove.append(trade_id)
+                    continue
+                
+                # Check for liquidation danger (emergency close)
+                if self._is_near_liquidation(trade, current_price):
+                    logger.warning(f"⚠️ EMERGENCY: {trade.symbol} near liquidation! Force closing...")
+                    if self._execute_exit_order(trade, "EMERGENCY_LIQUIDATION_PROTECTION"):
+                        trades_to_remove.append(trade_id)
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"❌ Error checking trade {trade_id}: {e}")
+        
+        # Remove completed trades
+        for trade_id in trades_to_remove:
+            if trade_id in self.active_trades:
+                del self.active_trades[trade_id]
+
+    def _should_trigger_stop_loss(self, trade: ActiveTrade, current_price: float) -> bool:
+        """Check if stop loss should be triggered"""
+        if trade.side == 'long':
+            return current_price <= trade.stop_loss
+        else:  # short
+            return current_price >= trade.stop_loss
+
+    def _should_trigger_take_profit(self, trade: ActiveTrade, current_price: float) -> bool:
+        """Check if take profit should be triggered"""
+        if trade.side == 'long':
+            return current_price >= trade.take_profit
+        else:  # short
+            return current_price <= trade.take_profit
+
+    def _is_near_liquidation(self, trade: ActiveTrade, current_price: float) -> bool:
+        """Check if position is dangerously close to liquidation"""
+        if not trade.liquidation_price or trade.liquidation_price <= 0:
+            return False
+        
+        # If price is within 2% of liquidation price, emergency close
+        if trade.side == 'long':
+            distance_pct = ((current_price - trade.liquidation_price) / current_price) * 100
+        else:
+            distance_pct = ((trade.liquidation_price - current_price) / current_price) * 100
+        
+        return distance_pct < 2.0
+
+    def _execute_exit_order(self, trade: ActiveTrade, reason: str) -> bool:
+        """Execute exit order for a trade"""
+        try:
+            logger.info(f"🔥 Executing {reason} for {trade.symbol}")
+            
+            # Get current price for recording
+            current_price = self.perpetual_fetcher.get_current_price(trade.symbol)
+            
+            # Determine order side
+            close_side = 'sell' if trade.side == 'long' else 'buy'
+            
+            # Execute market order to close position
+            order = self.exchange.create_market_order(
+                trade.symbol, 
+                close_side, 
+                abs(trade.quantity)
+            )
+            
+            exit_price = float(order['average']) if order['average'] else current_price
+            
+            logger.info(f"✅ {reason} executed for {trade.symbol}")
+            logger.info(f"   Exit Price: ${exit_price:.8f}")
+            logger.info(f"   Quantity: {abs(trade.quantity):.8f}")
+            
+            # Record the exit
+            self._record_trade_exit(trade, exit_price, reason)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to execute {reason} for {trade.symbol}: {e}")
+            return False
+
     def _normalize_coin_input(self, coin_input: str) -> tuple:
         """Simple normalization - validate the symbol exists"""
         try:
@@ -339,7 +510,7 @@ class LiquidationSafeFuturesTrader:
 
     def _calculate_precise_liquidation_price(self, entry_price: float, quantity: float, 
                                            margin_amount: float, side: str, symbol: str) -> float:
-        """Calculate precise liquidation price using Binance's exact formula - FIXED VERSION"""
+        """Calculate precise liquidation price using Binance's exact formula"""
         try:
             notional_value = abs(entry_price * quantity)
             mmr, cum = self._get_maintenance_margin_rate(symbol, notional_value)
@@ -448,35 +619,89 @@ class LiquidationSafeFuturesTrader:
         except Exception as e:
             logger.error(f"❌ Error saving trade to CSV: {e}")
 
-    def _record_trade_entry(self, symbol, coin_name, side, leverage, entry_price, quantity, 
-                           margin_amount, stop_loss, take_profit, tp_type, liquidation_price=None):
-        """Record trade entry to CSV with liquidation price"""
+    def _record_trade_entry(self, trade: ActiveTrade) -> str:
+        """Record trade entry to CSV and return trade ID"""
+        trade_id = f"{trade.symbol}_{int(time.time())}"
         
         trade_data = {
             'Date': datetime.now().strftime("%Y-%m-%d"),
             'Time': datetime.now().strftime("%H:%M:%S"),
+            'Trade_ID': trade_id,
             'Action': 'ENTRY',
-            'Coin': coin_name,
-            'Symbol': symbol,
-            'Side': side,
-            'Leverage': leverage,
-            'Entry_Price': entry_price,
-            'Liquidation_Price': liquidation_price,
-            'Quantity': quantity,
-            'Notional_USD': entry_price * abs(quantity),
-            'Margin_Used': margin_amount,
-            'Stop_Loss': stop_loss,
-            'Take_Profit': take_profit,
-            'TP_Type': tp_type,
+            'Coin': trade.coin_name,
+            'Symbol': trade.symbol,
+            'Side': trade.side,
+            'Leverage': trade.leverage,
+            'Entry_Price': trade.entry_price,
+            'Liquidation_Price': trade.liquidation_price,
+            'Quantity': trade.quantity,
+            'Notional_USD': trade.entry_price * abs(trade.quantity),
+            'Margin_Used': trade.margin_used,
+            'Stop_Loss': trade.stop_loss,
+            'Take_Profit': trade.take_profit,
+            'TP_Type': trade.tp_type,
             'Exit_Price': None,
             'Exit_Time': None,
             'PnL_USD': None,
             'PnL_Percent': None,
             'Exit_Reason': None,
             'Trade_Duration_Minutes': None,
-            'Expected_TP_Profit': abs(take_profit - entry_price) * abs(quantity) if take_profit else None
+            'Expected_TP_Profit': abs(trade.take_profit - trade.entry_price) * abs(trade.quantity) if trade.take_profit else None,
+            'Monitoring_Status': 'SELF_MONITORING_ACTIVE'
         }
         self._save_trade_to_csv(trade_data)
+        return trade_id
+
+    def _record_trade_exit(self, trade: ActiveTrade, exit_price: float, exit_reason: str):
+        """Record trade exit to CSV"""
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            csv_filename = f"futures_trading_report_{today}.csv"
+            csv_filepath = os.path.join(self.reports_folder, csv_filename)
+            
+            if os.path.exists(csv_filepath):
+                df = pd.read_csv(csv_filepath)
+                
+                # Find the trade entry by Trade_ID
+                mask = (df['Trade_ID'] == trade.trade_id) & (df['Action'] == 'ENTRY')
+                
+                if mask.any():
+                    # Update the trade entry with exit information
+                    latest_idx = df[mask].index[-1]
+                    df.loc[latest_idx, 'Exit_Price'] = exit_price
+                    df.loc[latest_idx, 'Exit_Time'] = datetime.now().strftime("%H:%M:%S")
+                    df.loc[latest_idx, 'Exit_Reason'] = exit_reason
+                    
+                    # Calculate PnL
+                    entry_price = df.loc[latest_idx, 'Entry_Price']
+                    quantity = df.loc[latest_idx, 'Quantity']
+                    side = df.loc[latest_idx, 'Side']
+                    
+                    if side == 'long':
+                        pnl_usd = (exit_price - entry_price) * abs(quantity)
+                    else:
+                        pnl_usd = (entry_price - exit_price) * abs(quantity)
+                    
+                    pnl_percent = (pnl_usd / df.loc[latest_idx, 'Margin_Used']) * 100
+                    
+                    df.loc[latest_idx, 'PnL_USD'] = pnl_usd
+                    df.loc[latest_idx, 'PnL_Percent'] = pnl_percent
+                    
+                    # Calculate trade duration
+                    entry_time = datetime.strptime(f"{df.loc[latest_idx, 'Date']} {df.loc[latest_idx, 'Time']}", 
+                                                 "%Y-%m-%d %H:%M:%S")
+                    exit_time = datetime.strptime(f"{datetime.now().strftime('%Y-%m-%d')} {datetime.now().strftime('%H:%M:%S')}", 
+                                                "%Y-%m-%d %H:%M:%S")
+                    duration_minutes = (exit_time - entry_time).total_seconds() / 60
+                    df.loc[latest_idx, 'Trade_Duration_Minutes'] = duration_minutes
+                    
+                    df.to_csv(csv_filepath, index=False)
+                    
+                    logger.info(f"📊 Trade exit recorded: PnL ${pnl_usd:.2f} ({pnl_percent:.2f}%)")
+                    logger.info(f"   Duration: {duration_minutes:.1f} minutes")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error recording trade exit: {e}")
 
     def _find_swing_high_low(self, df, lookback=10):
         """Find the LAST (most recent) swing high and swing low from price data"""
@@ -557,12 +782,21 @@ class LiquidationSafeFuturesTrader:
               use_fixed_tp=False, fixed_tp_percent=2.5, use_swing_levels=False, 
               swing_lookback=10, liquidation_buffer=5, fixed_tp_dollars=None, 
               use_atr_stoploss=False, atr_multiplier=2.0):
-        """Execute a LIQUIDATION-SAFE futures trade
+        """Execute a FULLY SELF-MONITORING liquidation-safe futures trade
+        
+        🤖 SELF-MONITORING FEATURES:
+        - Continuously monitors price every 5 seconds
+        - Automatically executes stop-loss when price hits level
+        - Automatically executes take-profit when price hits level
+        - Automatically records all trades to CSV
+        - Emergency liquidation protection
+        - No external dependencies - everything handled internally
         
         🛡️ KEY SAFETY FEATURES:
-        - Fetches ACTUAL liquidation price from Binance API (not calculated)
+        - Fetches ACTUAL liquidation price from Binance API
         - Uses tiered maintenance margin rates
         - Applies multiple safety buffers (volatility + slippage + user buffer)
+        - Real-time position monitoring
         
         Args:
             coin: Trading symbol
@@ -590,7 +824,7 @@ class LiquidationSafeFuturesTrader:
                 logger.warning(f"⚠️ Buffer {liquidation_buffer}% too low! Using minimum 5%")
                 liquidation_buffer = 5
             
-            logger.info(f"🛡️ INITIATING LIQUIDATION-SAFE TRADE: {coin_name} {side.upper()}")
+            logger.info(f"🤖 INITIATING SELF-MONITORING LIQUIDATION-SAFE TRADE: {coin_name} {side.upper()}")
             logger.info(f"💰 Margin: ${margin_amount} | Leverage: {leverage}x | Buffer: {liquidation_buffer}%")
             
             side = side.lower()
@@ -707,7 +941,7 @@ class LiquidationSafeFuturesTrader:
                     if initial_stop_loss <= current_price:
                         initial_stop_loss = current_price * 1.03
                 
-                tp_type = f"LAST Swing levels (lookback: {swing_lookback})"
+                tp_type = f"Swing levels (lookback: {swing_lookback})"
                 
             elif fixed_tp_dollars:
                 # FIXED DOLLAR TAKE PROFIT
@@ -735,46 +969,80 @@ class LiquidationSafeFuturesTrader:
                         initial_stop_loss = current_price * 1.03  # 3% stop
                 
             else:
-                # ATR-BASED STOP LOSS with other TP methods
+                # COMPREHENSIVE ATR-BASED SYSTEM
                 if use_atr_stoploss:
+                    # ATR-based stop loss
                     stop_distance = atr_value * atr_multiplier
                     
                     if side == 'long':
                         initial_stop_loss = current_price - stop_distance
+                        
                         if use_fixed_tp:
+                            # Fixed percentage take profit
                             take_profit = current_price * (1 + fixed_tp_percent / 100)
-                            tp_type = f"Fixed {fixed_tp_percent}%"
+                            tp_type = f"Fixed {fixed_tp_percent}% TP + ATR SL"
                         else:
-                            take_profit = current_price + (stop_distance * take_profit_ratio)
-                            tp_type = f"ATR-based (1:{take_profit_ratio})"
-                    else:
+                            # ATR-based take profit with risk/reward ratio
+                            profit_distance = stop_distance * take_profit_ratio
+                            take_profit = current_price + profit_distance
+                            tp_type = f"ATR-based SL/TP (1:{take_profit_ratio} R:R)"
+                            
+                            # Log ATR calculation details
+                            logger.info(f"📊 ATR Calculation Details:")
+                            logger.info(f"   ATR Value: ${atr_value:.8f}")
+                            logger.info(f"   ATR Multiplier: {atr_multiplier}")
+                            logger.info(f"   Stop Distance: ${stop_distance:.8f}")
+                            logger.info(f"   Profit Distance: ${profit_distance:.8f}")
+                            logger.info(f"   Risk/Reward Ratio: 1:{take_profit_ratio}")
+                            
+                    else:  # short
                         initial_stop_loss = current_price + stop_distance
+                        
                         if use_fixed_tp:
+                            # Fixed percentage take profit
                             take_profit = current_price * (1 - fixed_tp_percent / 100)
-                            tp_type = f"Fixed {fixed_tp_percent}%"
+                            tp_type = f"Fixed {fixed_tp_percent}% TP + ATR SL"
                         else:
-                            take_profit = current_price - (stop_distance * take_profit_ratio)
-                            tp_type = f"ATR-based (1:{take_profit_ratio})"
+                            # ATR-based take profit with risk/reward ratio
+                            profit_distance = stop_distance * take_profit_ratio
+                            take_profit = current_price - profit_distance
+                            tp_type = f"ATR-based SL/TP (1:{take_profit_ratio} R:R)"
+                            
+                            # Log ATR calculation details
+                            logger.info(f"📊 ATR Calculation Details:")
+                            logger.info(f"   ATR Value: ${atr_value:.8f}")
+                            logger.info(f"   ATR Multiplier: {atr_multiplier}")
+                            logger.info(f"   Stop Distance: ${stop_distance:.8f}")
+                            logger.info(f"   Profit Distance: ${profit_distance:.8f}")
+                            logger.info(f"   Risk/Reward Ratio: 1:{take_profit_ratio}")
+                            
                 else:
-                    # Original logic for backward compatibility
-                    stop_distance = atr_value * 1.5
+                    # Traditional ATR-based system (backward compatibility)
+                    stop_distance = atr_value * 1.5  # Default ATR multiplier
                     
                     if side == 'long':
                         initial_stop_loss = current_price - stop_distance
+                        
                         if use_fixed_tp:
                             take_profit = current_price * (1 + fixed_tp_percent / 100)
-                            tp_type = f"Fixed {fixed_tp_percent}%"
+                            tp_type = f"Fixed {fixed_tp_percent}% TP"
                         else:
-                            take_profit = current_price + (stop_distance * take_profit_ratio)
-                            tp_type = f"ATR-based (1:{take_profit_ratio})"
-                    else:
+                            # Use take_profit_ratio for traditional ATR system
+                            profit_distance = stop_distance * take_profit_ratio
+                            take_profit = current_price + profit_distance
+                            tp_type = f"Traditional ATR (1:{take_profit_ratio} R:R)"
+                            
+                    else:  # short
                         initial_stop_loss = current_price + stop_distance
+                        
                         if use_fixed_tp:
                             take_profit = current_price * (1 - fixed_tp_percent / 100)
-                            tp_type = f"Fixed {fixed_tp_percent}%"
+                            tp_type = f"Fixed {fixed_tp_percent}% TP"
                         else:
-                            take_profit = current_price - (stop_distance * take_profit_ratio)
-                            tp_type = f"ATR-based (1:{take_profit_ratio})"
+                            # Use take_profit_ratio for traditional ATR system
+                            profit_distance = stop_distance * take_profit_ratio
+                            take_profit = current_price - profit_distance
+                            tp_type = f"Traditional ATR (1:{take_profit_ratio} R:R)"
             
             # 🛡️ CRITICAL: Calculate ultra-safe stop loss with calculated liquidation price
             logger.info("🛡️ CALCULATING ULTRA-SAFE STOP LOSS...")
@@ -903,7 +1171,32 @@ class LiquidationSafeFuturesTrader:
                         self.exchange.create_market_order(symbol, close_side, abs(quantity))
                         return False
 
-                logger.info(f"✅ LIQUIDATION-SAFE ORDER COMPLETED!")
+                # 🤖 CREATE ACTIVE TRADE FOR MONITORING
+                active_trade = ActiveTrade(
+                    symbol=symbol,
+                    coin_name=coin_name,
+                    side=side,
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    margin_used=margin_amount,
+                    stop_loss=safe_stop_loss,
+                    take_profit=take_profit,
+                    tp_type=tp_type,
+                    liquidation_price=final_liquidation_price,
+                    leverage=leverage,
+                    entry_time=datetime.now(),
+                    trade_id="",  # Will be set by record function
+                    status="ACTIVE"
+                )
+                
+                # Record trade entry and get trade ID
+                trade_id = self._record_trade_entry(active_trade)
+                active_trade.trade_id = trade_id
+                
+                # Add to active trades for monitoring
+                self.active_trades[trade_id] = active_trade
+
+                logger.info(f"✅ SELF-MONITORING LIQUIDATION-SAFE ORDER COMPLETED!")
                 logger.info(f"   Side: {side.upper()}")
                 logger.info(f"   Entry Price: ${entry_price:.8f}")
                 logger.info(f"   🎯 ACTUAL Liquidation Price: ${final_liquidation_price:.8f}")
@@ -932,13 +1225,15 @@ class LiquidationSafeFuturesTrader:
                 actual_ratio = reward / risk if risk > 0 else 0
                 logger.info(f"⚖️ Risk/Reward: 1:{actual_ratio:.2f}")
                 
-                # Record trade entry to CSV with ACTUAL liquidation price
-                self._record_trade_entry(symbol, coin_name, side, leverage, entry_price, 
-                                       quantity, margin_amount, safe_stop_loss, take_profit, 
-                                       tp_type, final_liquidation_price)
+                logger.info("🤖 ✅ TRADE IS NOW UNDER SELF-MONITORING!")
+                logger.info("   👁️ Continuous price monitoring every 5 seconds")
+                logger.info("   📉 Stop Loss will execute automatically when hit")
+                logger.info("   📈 Take Profit will execute automatically when hit")
+                logger.info("   🛡️ Emergency liquidation protection active")
+                logger.info("   📊 All trades automatically recorded to CSV")
+                logger.info("   🚀 NO MANUAL INTERVENTION REQUIRED!")
                 
-                logger.info("📝 Trade recorded successfully")
-                logger.info("⚠️ Note: No automatic monitoring - you'll need to manually manage TP/SL")
+                logger.info("📝 Trade recorded and monitoring started successfully")
                 
                 return {
                     'success': True,
@@ -953,7 +1248,9 @@ class LiquidationSafeFuturesTrader:
                     'stop_loss': safe_stop_loss,
                     'take_profit': take_profit,
                     'tp_type': tp_type,
-                    'safety_buffer': liq_distance_pct - stop_distance_pct
+                    'safety_buffer': liq_distance_pct - stop_distance_pct,
+                    'trade_id': trade_id,
+                    'monitoring_status': 'ACTIVE'
                 }
                 
             except Exception as e:
@@ -961,11 +1258,11 @@ class LiquidationSafeFuturesTrader:
                 return False
             
         except Exception as e:
-            logger.error(f"❌ Critical error in liquidation-safe trade: {e}")
+            logger.error(f"❌ Critical error in self-monitoring liquidation-safe trade: {e}")
             return False
 
     def close_position(self, coin, reason="MANUAL_CLOSE"):
-        """Manually close a futures position"""
+        """Manually close a futures position and remove from monitoring"""
         try:
             symbol, coin_name = self._normalize_coin_input(coin)
             if not symbol or not coin_name:
@@ -974,11 +1271,28 @@ class LiquidationSafeFuturesTrader:
             
             logger.info(f"🔄 CLOSING FUTURES POSITION: {coin_name}")
             
+            # Find active trade
+            active_trade = None
+            trade_id_to_remove = None
+            for tid, trade in self.active_trades.items():
+                if trade.symbol == symbol:
+                    active_trade = trade
+                    trade_id_to_remove = tid
+                    break
+            
+            if not active_trade:
+                logger.warning(f"⚠️ No active monitored trade found for {symbol}")
+                # Still try to close any existing position
+            
             # Get current position data
             position_info = self.perpetual_fetcher.get_position_info(symbol)
             
             if not position_info or position_info.get('positionAmt', 0) == 0:
                 logger.info(f"❌ No active position for {symbol}")
+                # Remove from monitoring if exists
+                if trade_id_to_remove:
+                    del self.active_trades[trade_id_to_remove]
+                    logger.info(f"🚫 Removed {symbol} from monitoring")
                 return False
             
             quantity = float(position_info.get('positionAmt', 0))
@@ -1008,64 +1322,18 @@ class LiquidationSafeFuturesTrader:
             logger.info(f"✅ FUTURES POSITION CLOSED - {coin_name}")
             logger.info(f"💰 Exit Price: ${exit_price:.8f}")
             
-            # Record the exit
-            self._record_trade_exit(symbol, exit_price, reason)
+            # Record the exit if we have the active trade
+            if active_trade:
+                self._record_trade_exit(active_trade, exit_price, reason)
+                # Remove from monitoring
+                del self.active_trades[trade_id_to_remove]
+                logger.info(f"🚫 Removed {symbol} from monitoring")
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Error closing futures position: {e}")
             return False
-
-    def _record_trade_exit(self, symbol: str, exit_price: float, exit_reason: str):
-        """Record trade exit to CSV"""
-        try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            csv_filename = f"futures_trading_report_{today}.csv"
-            csv_filepath = os.path.join(self.reports_folder, csv_filename)
-            
-            if os.path.exists(csv_filepath):
-                df = pd.read_csv(csv_filepath)
-                
-                # Find the most recent entry for this symbol that hasn't been closed
-                mask = (df['Symbol'] == symbol) & (df['Action'] == 'ENTRY') & (df['Exit_Price'].isna())
-                
-                if mask.any():
-                    # Update the most recent entry
-                    latest_idx = df[mask].index[-1]
-                    df.loc[latest_idx, 'Exit_Price'] = exit_price
-                    df.loc[latest_idx, 'Exit_Time'] = datetime.now().strftime("%H:%M:%S")
-                    df.loc[latest_idx, 'Exit_Reason'] = exit_reason
-                    
-                    # Calculate PnL
-                    entry_price = df.loc[latest_idx, 'Entry_Price']
-                    quantity = df.loc[latest_idx, 'Quantity']
-                    side = df.loc[latest_idx, 'Side']
-                    
-                    if side == 'long':
-                        pnl_usd = (exit_price - entry_price) * abs(quantity)
-                    else:
-                        pnl_usd = (entry_price - exit_price) * abs(quantity)
-                    
-                    pnl_percent = (pnl_usd / df.loc[latest_idx, 'Margin_Used']) * 100
-                    
-                    df.loc[latest_idx, 'PnL_USD'] = pnl_usd
-                    df.loc[latest_idx, 'PnL_Percent'] = pnl_percent
-                    
-                    # Calculate trade duration
-                    entry_time = datetime.strptime(f"{df.loc[latest_idx, 'Date']} {df.loc[latest_idx, 'Time']}", 
-                                                 "%Y-%m-%d %H:%M:%S")
-                    exit_time = datetime.strptime(f"{datetime.now().strftime('%Y-%m-%d')} {datetime.now().strftime('%H:%M:%S')}", 
-                                                "%Y-%m-%d %H:%M:%S")
-                    duration_minutes = (exit_time - entry_time).total_seconds() / 60
-                    df.loc[latest_idx, 'Trade_Duration_Minutes'] = duration_minutes
-                    
-                    df.to_csv(csv_filepath, index=False)
-                    
-                    logger.info(f"📊 Trade exit recorded: PnL ${pnl_usd:.2f} ({pnl_percent:.2f}%)")
-                    
-        except Exception as e:
-            logger.error(f"❌ Error recording trade exit: {e}")
 
     def get_balance(self):
         """Get account balance"""
@@ -1083,7 +1351,7 @@ class LiquidationSafeFuturesTrader:
             return None
 
     def get_all_positions(self):
-        """Get all active positions"""
+        """Get all active positions with their monitoring status"""
         try:
             logger.info("📊 FETCHING ALL ACTIVE POSITIONS...")
             
@@ -1092,23 +1360,42 @@ class LiquidationSafeFuturesTrader:
             
             for position in positions:
                 if float(position.get('contracts', 0)) > 0:
+                    symbol = position.get('symbol')
+                    
+                    # Check if this position is being monitored
+                    is_monitored = any(trade.symbol == symbol for trade in self.active_trades.values())
+                    monitoring_trade = None
+                    for trade in self.active_trades.values():
+                        if trade.symbol == symbol:
+                            monitoring_trade = trade
+                            break
+                    
                     pos_data = {
-                        'symbol': position.get('symbol'),
+                        'symbol': symbol,
                         'side': position.get('side'),
                         'position_amount': float(position.get('contracts', 0)),
                         'entry_price': float(position.get('entryPrice', 0)),
                         'mark_price': float(position.get('markPrice', 0)),
                         'unrealized_pnl': float(position.get('unrealizedPnl', 0)),
                         'percentage': float(position.get('percentage', 0)),
-                        'notional': float(position.get('notional', 0))
+                        'notional': float(position.get('notional', 0)),
+                        'monitored': is_monitored,
+                        'stop_loss': monitoring_trade.stop_loss if monitoring_trade else None,
+                        'take_profit': monitoring_trade.take_profit if monitoring_trade else None
                     }
                     active_positions.append(pos_data)
                     
-                    logger.info(f"📍 {pos_data['symbol']} | {pos_data['side'].upper()}")
+                    monitoring_status = "🤖 SELF-MONITORED" if pos_data['monitored'] else "⚠️ UNMONITORED"
+                    
+                    logger.info(f"📍 {pos_data['symbol']} | {pos_data['side'].upper()} | {monitoring_status}")
                     logger.info(f"   Size: {pos_data['position_amount']:.8f}")
                     logger.info(f"   Entry: ${pos_data['entry_price']:.8f}")
                     logger.info(f"   Mark: ${pos_data['mark_price']:.8f}")
                     logger.info(f"   PnL: ${pos_data['unrealized_pnl']:.4f} ({pos_data['percentage']:.2f}%)")
+                    
+                    if pos_data['monitored']:
+                        logger.info(f"   SL: ${pos_data['stop_loss']:.8f} | TP: ${pos_data['take_profit']:.8f}")
+                    
                     logger.info("   " + "="*50)
             
             if not active_positions:
@@ -1118,7 +1405,12 @@ class LiquidationSafeFuturesTrader:
                 
                 # Summary
                 total_unrealized = sum(pos['unrealized_pnl'] for pos in active_positions)
+                monitored_count = sum(1 for pos in active_positions if pos['monitored'])
+                unmonitored_count = len(active_positions) - monitored_count
+                
                 logger.info(f"💰 Total Unrealized PnL: ${total_unrealized:.2f}")
+                logger.info(f"🤖 Self-Monitored Positions: {monitored_count}")
+                logger.info(f"⚠️ Unmonitored Positions: {unmonitored_count}")
             
             return active_positions
             
@@ -1126,49 +1418,123 @@ class LiquidationSafeFuturesTrader:
             logger.error(f"❌ Error fetching positions: {e}")
             return []
 
-# Initialize the liquidation-safe trader
-futures_trader = LiquidationSafeFuturesTrader()
+    def get_monitoring_status(self):
+        """Get detailed monitoring status"""
+        try:
+            logger.info("👁️ MONITORING STATUS")
+            logger.info(f"   Status: {'🟢 ACTIVE' if self.monitoring_active else '🔴 INACTIVE'}")
+            logger.info(f"   Check Interval: {self.monitoring_interval} seconds")
+            logger.info(f"   Active Trades: {len(self.active_trades)}")
+            
+            if self.active_trades:
+                logger.info("\n📊 MONITORED TRADES:")
+                for trade_id, trade in self.active_trades.items():
+                    current_price = self.perpetual_fetcher.get_current_price(trade.symbol)
+                    
+                    if trade.side == 'long':
+                        sl_distance = ((current_price - trade.stop_loss) / current_price) * 100
+                        tp_distance = ((trade.take_profit - current_price) / current_price) * 100
+                    else:
+                        sl_distance = ((trade.stop_loss - current_price) / current_price) * 100
+                        tp_distance = ((current_price - trade.take_profit) / current_price) * 100
+                    
+                    logger.info(f"   {trade.symbol} | {trade.side.upper()}")
+                    logger.info(f"   Current: ${current_price:.8f}")
+                    logger.info(f"   SL: ${trade.stop_loss:.8f} ({sl_distance:+.2f}%)")
+                    logger.info(f"   TP: ${trade.take_profit:.8f} ({tp_distance:+.2f}%)")
+                    logger.info(f"   Duration: {(datetime.now() - trade.entry_time).total_seconds() / 60:.1f} min")
+                    logger.info("   " + "-"*40)
+            else:
+                logger.info("   No trades currently being monitored")
+            
+            return {
+                'monitoring_active': self.monitoring_active,
+                'check_interval': self.monitoring_interval,
+                'active_trades_count': len(self.active_trades),
+                'active_trades': self.active_trades
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting monitoring status: {e}")
+            return {}
 
-# 🛡️ LIQUIDATION-SAFE TRADING EXAMPLES:
+    def stop_all_monitoring(self):
+        """Stop monitoring and close all active trades"""
+        try:
+            logger.info("🛑 STOPPING ALL MONITORING AND CLOSING POSITIONS...")
+            
+            # Close all active trades
+            trades_to_close = list(self.active_trades.keys())
+            for trade_id in trades_to_close:
+                trade = self.active_trades[trade_id]
+                logger.info(f"🔄 Closing monitored position: {trade.symbol}")
+                self.close_position(trade.symbol.replace('USDT', ''), "MONITORING_STOPPED")
+            
+            # Stop monitoring
+            self.stop_monitoring()
+            
+            logger.info("✅ All monitoring stopped and positions closed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error stopping monitoring: {e}")
+            return False
 
-# 1. Test JUP short with fixed $10 profit and ATR stop loss
-# futures_trader.trade("JUP", 10, leverage=20, side="short", fixed_tp_dollars=10, use_atr_stoploss=True, atr_multiplier=2.0)
+# Initialize the self-monitoring liquidation-safe trader
+self_monitoring_trader = SelfMonitoringFuturesTrader()
 
-# 2. BTC long with fixed $50 profit and ATR stop loss
-# futures_trader.trade("BTC", 100, leverage=10, side="long", fixed_tp_dollars=50, use_atr_stoploss=True, atr_multiplier=1.5)
+# 🤖 FULLY SELF-MONITORING TRADING EXAMPLES:
 
-# 3. ETH short with fixed $25 profit and conservative ATR stop
-# futures_trader.trade("ETH", 50, leverage=5, side="short", fixed_tp_dollars=25, use_atr_stoploss=True, atr_multiplier=1.2)
 
-# 4. SOL long with ATR-based stop loss only (no fixed dollar TP)
-# futures_trader.trade("SOL", 25, leverage=8, side="long", use_atr_stoploss=True, atr_multiplier=1.8, use_fixed_tp=True, fixed_tp_percent=3.0)
 
-# 5. Traditional trade (backward compatibility)
-# futures_trader.trade("BTC", 100, leverage=10, side="long", liquidation_buffer=5)
+# # Example: 1:2 Risk/Reward ATR system
+# self_monitoring_trader.trade("BTC", 100, leverage=10, side="long", 
+#                         use_atr_stoploss=True, atr_multiplier=2.0, take_profit_ratio=2.0)
 
-# 6. Check balance
-# futures_trader.get_balance()
 
-# 7. Check all positions
-# futures_trader.get_all_positions()
+# # Example: Make exactly $50 profit
+# self_monitoring_trader.trade("ETH", 50, leverage=8, side="long", 
+#                         fixed_tp_dollars=50, use_atr_stoploss=True, atr_multiplier=1.8)
 
-# 8. Close a position manually
-# futures_trader.close_position("BTC", reason="MANUAL_EXIT")
 
-# logger.info("🚀 Enhanced Liquidation-Safe Futures Trader Ready!")
-# logger.info("✨ Key Features:")
-# logger.info("   🎯 FETCHES ACTUAL liquidation price from Binance API (not calculated)")
-# logger.info("   💰 Fixed dollar-based take profit option")
-# logger.info("   🎯 ATR-based stop loss with customizable multiplier (default 2.0)")
-# logger.info("   📊 Enhanced safety buffers and validation")
-# logger.info("   🛡️ Minimum 5% liquidation safety buffer")
-# logger.info("   📝 Trade recording to CSV files")
-# logger.info("")
-# logger.info("💡 New Trading Options:")
-# logger.info("   📈 Use fixed_tp_dollars=X for exact dollar profit targets")
-# logger.info("   📉 Use use_atr_stoploss=True for volatility-based stop losses")
-# logger.info("   ⚙️ Customize atr_multiplier for stop loss sensitivity (recommended: 2.0)")
-# logger.info("")
-# logger.info("🔥 MAJOR UPDATE: Now uses REAL liquidation prices from Binance!")
-# logger.info("⚠️ Note: No automatic monitoring - you'll need to manually manage TP/SL orders")
-# logger.info("🎯 Ready for ultra-safe futures trading!")
+# # Example: 3% profit target
+# self_monitoring_trader.trade("SOL", 75, leverage=5, side="short", 
+#                         use_fixed_tp=True, fixed_tp_percent=3.0, 
+#                         use_atr_stoploss=True, atr_multiplier=2.0)
+
+
+# # Example: Swing high/low targets
+# self_monitoring_trader.trade("MATIC", 40, leverage=6, side="long", 
+#                         use_swing_levels=True, swing_lookback=15, 
+#                         use_atr_stoploss=True, atr_multiplier=1.5)
+
+
+# # Example: Classic ATR with 1:2.5 ratio
+# self_monitoring_trader.trade("AVAX", 60, leverage=7, side="long", 
+#                         take_profit_ratio=2.5)
+
+
+# # Example: Swing TP + ATR SL
+# self_monitoring_trader.trade("LINK", 35, leverage=5, side="long", 
+#                         use_swing_levels=True, swing_lookback=12, 
+#                         use_atr_stoploss=True, atr_multiplier=2.2)
+
+# # Example: Fixed dollar + ATR SL
+# self_monitoring_trader.trade("DOT", 45, leverage=4, side="short", 
+#                         fixed_tp_dollars=30, use_atr_stoploss=True, atr_multiplier=1.6)
+
+
+# 7. Check balance
+# self_monitoring_trader.get_balance()
+
+# 8. Check all positions with monitoring status
+# self_monitoring_trader.get_all_positions()
+
+# 9. Get detailed monitoring status
+# self_monitoring_trader.get_monitoring_status()
+
+# 10. Close a specific position manually
+# self_monitoring_trader.close_position("BTC", reason="MANUAL_EXIT")
+
+# 11. Stop all monitoring and close all positions
+# self_monitoring_trader.stop_all_monitoring()

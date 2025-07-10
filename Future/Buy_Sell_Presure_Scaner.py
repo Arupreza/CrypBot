@@ -397,5 +397,34 @@ def get_binance_buy_sell_pressure(symbols, include_both_markets=True, apply_filt
     scanner = BinanceUSDTPressureScanner()
     return scanner.get_dataframe(symbols=symbols, include_both_markets=include_both_markets, 
                                 apply_filters=apply_filters, top_n=top_n)
-    
-    
+
+
+
+# # ============================================================================
+# # 1. BOTH MARKETS (SPOT + PERPETUAL) - DEFAULT BEHAVIOR
+# # ============================================================================
+# print("\n📊 1. BOTH MARKETS ANALYSIS (SPOT + PERPETUAL)")
+# print("-" * 50)
+
+# both_markets_df = get_binance_buy_sell_pressure(
+#     symbols=symbols,
+#     include_both_markets=True,  # Both spot and perpetual
+#     apply_filters=True,
+#     top_n=20
+# )
+
+
+
+# # ============================================================================
+# # 2. SPOT MARKET ONLY
+# # ============================================================================
+# print("\n💰 2. SPOT MARKET ONLY ANALYSIS")
+# print("-" * 50)
+
+# spot_only_df = get_binance_buy_sell_pressure(
+#     symbols=symbols,
+#     include_both_markets=False,  # Spot only
+#     apply_filters=True,
+#     top_n=20
+# )
+
