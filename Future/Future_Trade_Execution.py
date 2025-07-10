@@ -820,9 +820,9 @@ class SelfMonitoringFuturesTrader:
                 return False
             
             # Enforce minimum safety buffer to 5%
-            if liquidation_buffer < 5:
+            if liquidation_buffer < 3:
                 logger.warning(f"⚠️ Buffer {liquidation_buffer}% too low! Using minimum 5%")
-                liquidation_buffer = 5
+                liquidation_buffer = 3
             
             logger.info(f"🤖 INITIATING SELF-MONITORING LIQUIDATION-SAFE TRADE: {coin_name} {side.upper()}")
             logger.info(f"💰 Margin: ${margin_amount} | Leverage: {leverage}x | Buffer: {liquidation_buffer}%")
@@ -1053,7 +1053,7 @@ class SelfMonitoringFuturesTrader:
             if side == 'long':
                 pre_liq_distance = ((current_price - calculated_liquidation_price) / current_price) * 100
                 stop_to_liq_distance = ((safe_stop_loss - calculated_liquidation_price) / current_price) * 100
-                if pre_liq_distance < (liquidation_buffer + 1) or stop_to_liq_distance < 2:
+                if pre_liq_distance < (liquidation_buffer + 0.5) or stop_to_liq_distance < 2:
                     logger.error(f"❌ POSITION TOO RISKY: Liquidation too close!")
                     logger.error(f"   Liquidation distance: {pre_liq_distance:.2f}%")
                     logger.error(f"   Stop to liquidation: {stop_to_liq_distance:.2f}%")
@@ -1535,6 +1535,9 @@ self_monitoring_trader = SelfMonitoringFuturesTrader()
 
 # 10. Close a specific position manually
 # self_monitoring_trader.close_position("BTC", reason="MANUAL_EXIT")
+
+# # If monitoring was stopped, start it manually
+# self_monitoring_trader.start_monitoring()
 
 # 11. Stop all monitoring and close all positions
 # self_monitoring_trader.stop_all_monitoring()
