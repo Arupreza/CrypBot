@@ -603,7 +603,7 @@ def analyze_single_coin(symbol, timeframe='15m', chandelier_limit=200, zlsma_lim
         traceback.print_exc()
         return None
 
-def scan_multiple_coins(coin_list, timeframe='15m', chandelier_limit=200, zlsma_limit=1000,
+def Chandelier_ZLSMA_Scan(coin_list, timeframe='15m', chandelier_limit=200, zlsma_limit=1000,
                        atr_period=1, atr_multiplier=2.0, zlsma_length=200, max_signal_candles=3,
                        signal_type='both'):
     """
@@ -664,15 +664,15 @@ def scan_multiple_coins(coin_list, timeframe='15m', chandelier_limit=200, zlsma_
 
 def scan_buy_signals_only(coin_list, **kwargs):
     """Convenience function to scan for buy signals only"""
-    return scan_multiple_coins(coin_list, signal_type='buy', **kwargs)
+    return Chandelier_ZLSMA_Scan(coin_list, signal_type='buy', **kwargs)
 
 def scan_sell_signals_only(coin_list, **kwargs):
     """Convenience function to scan for sell signals only"""
-    return scan_multiple_coins(coin_list, signal_type='sell', **kwargs)
+    return Chandelier_ZLSMA_Scan(coin_list, signal_type='sell', **kwargs)
 
 def scan_all_signals(coin_list, **kwargs):
     """Convenience function to scan for both buy and sell signals"""
-    return scan_multiple_coins(coin_list, signal_type='both', **kwargs)
+    return Chandelier_ZLSMA_Scan(coin_list, signal_type='both', **kwargs)
 
 ######## Advanced Scanner Class ########
 
@@ -689,7 +689,7 @@ class PerpetualFuturesScanner:
         
     def scan_coins(self, coin_list, timeframe='15m', max_signal_candles=3, signal_type='both'):
         """Scan coins with current settings"""
-        return scan_multiple_coins(
+        return Chandelier_ZLSMA_Scan(
             coin_list=coin_list,
             timeframe=timeframe,
             atr_period=self.atr_period,
@@ -722,7 +722,7 @@ class PerpetualFuturesScanner:
             
             
 
-# results_both = scan_multiple_coins(
+# results_both = Chandelier_ZLSMA_Scan(
 #     coin_list=custom_coins,
 #     timeframe='15m',
 #     chandelier_limit=200,
@@ -735,14 +735,14 @@ class PerpetualFuturesScanner:
 # )
 
 
-# results_buy = scan_multiple_coins(
+# results_buy = Chandelier_ZLSMA_Scan(
 #     coin_list=custom_coins,
 #     signal_type='buy'
 # )
 
 
 
-# results_sell = scan_multiple_coins(
+# results_sell = Chandelier_ZLSMA_Scan(
 #     coin_list=custom_coins,
 #     signal_type='sell'
 # )
