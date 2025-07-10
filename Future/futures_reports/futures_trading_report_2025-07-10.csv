@@ -1,0 +1,2 @@
+Date,Time,Action,Coin,Symbol,Side,Leverage,Entry_Price,Calculated_Liquidation_Price,Quantity,Notional_USD,Margin_Used,Stop_Loss,Take_Profit,TP_Type,Exit_Price,Exit_Time,PnL_USD,PnL_Percent,Exit_Reason,Trade_Duration_Minutes,Expected_TP_Profit
+2025-07-10,07:57:27,ENTRY,RENDER,RENDERUSDT,long,20,3.379,0.1672772277338126,59.1891092,199.9999999868,10,3.27763,3.58174,ATR-based (1:2.0),,,,,,,11.999999999207995

@@ -1,12 +1,257 @@
-import requests
 import pandas as pd
 import numpy as np
-import ccxt
+import requests
 from scipy import stats
 from datetime import datetime
 import time
 import warnings
 warnings.filterwarnings('ignore')
+
+######## ZLSMA ########
+
+def linreg(data, length, offset=0):
+    """
+    Calculate Linear Regression (LSMA - Least Squares Moving Average)
+    Enhanced to handle NaN values properly
+    
+    Parameters:
+    data: pandas Series - input data (typically close prices)
+    length: int - period for linear regression
+    offset: int - offset for the regression line (default 0)
+    
+    Returns:
+    pandas Series - linear regression values
+    """
+    if len(data) < length:
+        return pd.Series(np.nan, index=data.index)
+    
+    result = np.full(len(data), np.nan)
+    
+    for i in range(len(data)):
+        if i < length - 1:
+            result[i] = np.nan
+        else:
+            start_idx = i - length + 1
+            end_idx = i + 1
+            window_data = data.iloc[start_idx:end_idx]
+            
+            # Skip if any NaN values in the window
+            if window_data.isna().any():
+                result[i] = np.nan
+                continue
+                
+            window = window_data.values
+            x = np.arange(length)
+            
+            try:
+                # Use numpy polyfit which is more robust
+                coeffs = np.polyfit(x, window, 1)
+                slope, intercept = coeffs
+                reg_value = slope * (length - 1 + offset) + intercept
+                result[i] = reg_value
+            except (np.linalg.LinAlgError, ValueError):
+                result[i] = np.nan
+    
+    return pd.Series(result, index=data.index)
+
+def zlsma(data, length=32, offset=0):
+    """
+    Calculate Zero Lag LSMA - Fixed version matching Pine Script logic
+    
+    Parameters:
+    data: pandas Series - input data (typically close prices)
+    length: int - period for ZLSMA calculation (default 32)
+    offset: int - offset parameter (default 0)
+    
+    Returns:
+    pandas Series - ZLSMA values
+    """
+    min_required = 2 * length - 1
+    if len(data) < min_required:
+        print(f"ZLSMA: Need at least {min_required} data points, got {len(data)}")
+        return pd.Series(np.nan, index=data.index)
+    
+    # Reset index to ensure proper calculation
+    data_reset = data.reset_index(drop=True)
+    
+    lsma = linreg(data_reset, length, offset)
+    lsma2 = linreg(lsma, length, offset)
+    eq = lsma - lsma2
+    zlsma_result = lsma + eq
+    
+    # Restore original index
+    zlsma_result.index = data.index
+    
+    return zlsma_result
+
+def calculate_zlsma(in_df, close_column='close', timestamp_column=None, length=32, plot=True):
+    """
+    Load DataFrame, calculate ZLSMA, and optionally plot the results
+    
+    Parameters:
+    in_df: pandas DataFrame - input DataFrame
+    close_column: str - name of the close price column (default 'close')
+    timestamp_column: str - name of the timestamp column (if None, will try to auto-detect)
+    length: int - ZLSMA length parameter (default 32)
+    plot: bool - whether to plot the results (default True)
+    
+    Returns:
+    pandas DataFrame - DataFrame with original data and ZLSMA column
+    """
+    df = in_df.copy()
+    
+    if timestamp_column is None:
+        timestamp_candidates = ['timestamp', 'time', 'date', 'datetime', 'Date', 'Time', 'DateTime']
+        for col in timestamp_candidates:
+            if col in df.columns:
+                timestamp_column = col
+                break
+    
+    if timestamp_column and timestamp_column in df.columns:
+        df[timestamp_column] = pd.to_datetime(df[timestamp_column])
+    
+    min_required = 2 * length - 1
+    df[f'zlsma_{length}'] = zlsma(df[close_column], length=length)
+    
+    return df
+
+######## Chandelier Exit ########
+
+def calculate_atr(df: pd.DataFrame, length: int = 1) -> pd.Series:
+    """
+    Calculate Average True Range (ATR). Returns a pd.Series.
+    """
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift()).abs()
+    low_close_prev = (df['low'] - df['close'].shift()).abs()
+
+    true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    atr = true_range.rolling(window=length).mean()
+    return atr
+
+def chandelier_exit(
+    df: pd.DataFrame,
+    atr_period: int = 1,
+    atr_multiplier: float = 2.0,
+    use_close: bool = True
+) -> pd.DataFrame:
+    """
+    Given a DataFrame with at least 'high','low','close', this returns a copy of `df` with:
+    - 'atr'
+    - 'long_stop'
+    - 'short_stop'
+    - 'direction'
+    - 'chandelier_exit'
+    - 'buy_signal' (1 for entire duration while direction is long)
+    - 'sell_signal' (1 for entire duration while direction is short)
+    """
+    df_result = df.copy()
+
+    # Compute ATR
+    atr_raw = calculate_atr(df, length=atr_period)
+    atr = atr_raw * atr_multiplier
+
+    # Compute rolling highest/lowest
+    if use_close:
+        highest = df['close'].rolling(window=atr_period).max()
+        lowest = df['close'].rolling(window=atr_period).min()
+    else:
+        highest = df['high'].rolling(window=atr_period).max()
+        lowest = df['low'].rolling(window=atr_period).min()
+
+    n = len(df)
+    long_stop_array = np.full(n, np.nan)
+    short_stop_array = np.full(n, np.nan)
+    direction_array = np.full(n, 1)
+
+    for i in range(n):
+        if pd.isna(atr.iloc[i]) or pd.isna(highest.iloc[i]) or pd.isna(lowest.iloc[i]):
+            continue
+
+        curr_long = highest.iloc[i] - atr.iloc[i]
+        curr_short = lowest.iloc[i] + atr.iloc[i]
+
+        if i == 0:
+            long_stop_array[i] = curr_long
+            short_stop_array[i] = curr_short
+            direction_array[i] = 1
+        else:
+            prev_long = long_stop_array[i - 1] if not pd.isna(long_stop_array[i - 1]) else curr_long
+            if df['close'].iloc[i - 1] > prev_long:
+                long_stop_array[i] = max(curr_long, prev_long)
+            else:
+                long_stop_array[i] = curr_long
+
+            prev_short = short_stop_array[i - 1] if not pd.isna(short_stop_array[i - 1]) else curr_short
+            if df['close'].iloc[i - 1] < prev_short:
+                short_stop_array[i] = min(curr_short, prev_short)
+            else:
+                short_stop_array[i] = curr_short
+
+            prev_short_val = short_stop_array[i - 1] if not pd.isna(short_stop_array[i - 1]) else curr_short
+            prev_long_val = long_stop_array[i - 1] if not pd.isna(long_stop_array[i - 1]) else curr_long
+
+            if df['close'].iloc[i] > prev_short_val:
+                direction_array[i] = 1
+            elif df['close'].iloc[i] < prev_long_val:
+                direction_array[i] = -1
+            else:
+                direction_array[i] = direction_array[i - 1]
+
+    df_result['atr'] = atr
+    df_result['long_stop'] = long_stop_array
+    df_result['short_stop'] = short_stop_array
+    df_result['direction'] = direction_array
+    df_result['chandelier_exit'] = np.where(direction_array == 1, long_stop_array, short_stop_array)
+    df_result['buy_signal'] = (df_result['direction'] == 1).astype(int)
+    df_result['sell_signal'] = (df_result['direction'] == -1).astype(int)
+
+    return df_result
+
+def calculate_chandelier(
+    in_df: pd.DataFrame,
+    atr_period: int = 1,
+    atr_multiplier: float = 2.0,
+    timestamp_column: str = None,
+    use_close: bool = True,
+    plot: bool = False
+) -> pd.DataFrame:
+    """
+    Main function to calculate Chandelier Exit with proper timestamp handling
+    """
+    df = in_df.copy()
+
+    # Detect timestamp column
+    if timestamp_column is None:
+        for cand in ['timestamp', 'time', 'date', 'datetime', 'Date', 'Time', 'DateTime']:
+            if cand in df.columns:
+                timestamp_column = cand
+                break
+
+    if timestamp_column is not None and timestamp_column in df.columns:
+        df[timestamp_column] = pd.to_datetime(df[timestamp_column])
+        df['timestamp'] = df[timestamp_column]
+    else:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df['timestamp'] = df.index
+        else:
+            df['timestamp'] = df.index
+
+    # Verify required columns
+    missing = [c for c in ['high', 'low', 'close'] if c not in df.columns]
+    if missing:
+        raise ValueError(f"calculate_chandelier: Missing required columns: {missing}")
+
+    # Compute Chandelier Exit
+    df_ch = chandelier_exit(df, atr_period=atr_period, atr_multiplier=atr_multiplier, use_close=use_close)
+
+    # Ensure timestamp is included
+    if 'timestamp' not in df_ch.columns:
+        df_ch['timestamp'] = df_ch.index
+
+    return df_ch
+
+######## Data Fetching ########
 
 class BinancePerpetualFetcher:
     def __init__(self):
@@ -27,7 +272,17 @@ class BinancePerpetualFetcher:
             'MATIC': 'MATICUSDT',
             'LINK': 'LINKUSDT',
             'AVAX': 'AVAXUSDT',
-            'ATOM': 'ATOMUSDT'
+            'ATOM': 'ATOMUSDT',
+            'NEAR': 'NEARUSDT',
+            'FTM': 'FTMUSDT',
+            'UNI': 'UNIUSDT',
+            'AAVE': 'AAVEUSDT',
+            'ALGO': 'ALGOUSDT',
+            'XRP': 'XRPUSDT',
+            'LTC': 'LTCUSDT',
+            'BCH': 'BCHUSDT',
+            'ETC': 'ETCUSDT',
+            'TRX': 'TRXUSDT'
         }
         
         # If it's a simple symbol, convert to USDT pair
@@ -50,7 +305,7 @@ class BinancePerpetualFetcher:
                 'interval': interval,
                 'limit': limit
             }
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             
             data = response.json()
@@ -76,426 +331,418 @@ class BinancePerpetualFetcher:
         except requests.RequestException as e:
             print(f"Error fetching perpetual data for {symbol}: {e}")
             return None
-
-######## ZLSMA ########
-
-def linreg(data, length, offset=0):
-    result = np.full(len(data), np.nan)
-    
-    for i in range(len(data)):
-        if i < length - 1:
-            result[i] = np.nan
-        else:
-            window_data = data.iloc[i-length+1:i+1]
-            
-            if window_data.isna().any():
-                result[i] = np.nan
-                continue
-                
-            window = window_data.values
-            x = np.arange(length)
-            
-            try:
-                slope, intercept, _, _, _ = stats.linregress(x, window)
-                reg_value = slope * (length - 1 + offset) + intercept
-                result[i] = reg_value
-            except:
-                result[i] = np.nan
-    
-    return pd.Series(result, index=data.index)
-
-def zlsma(data, length=32, offset=0):
-    min_required = 2 * length - 1
-    if len(data) < min_required:
-        return pd.Series(np.nan, index=data.index)
-    
-    lsma = linreg(data, length, offset)
-    lsma2 = linreg(lsma, length, offset)
-    eq = lsma - lsma2
-    zlsma_result = lsma + eq
-    
-    return zlsma_result
-
-def calculate_zlsma(in_df, close_column='close', timestamp_column=None, length=32, plot=False):
-    df = in_df.copy()
-    
-    if timestamp_column is None:
-        timestamp_candidates = ['timestamp', 'time', 'date', 'datetime', 'Date', 'Time', 'DateTime']
-        for col in timestamp_candidates:
-            if col in df.columns:
-                timestamp_column = col
-                break
-    
-    if timestamp_column and timestamp_column in df.columns:
-        df[timestamp_column] = pd.to_datetime(df[timestamp_column])
-    
-    min_required = 2 * length - 1
-    df[f'zlsma_{length}'] = zlsma(df[close_column], length=length)
-    
-    return df
-
-def fetch_perpetual_data(symbol, timeframe='15m', limit=500):
-    """Fetch perpetual data using BinancePerpetualFetcher"""
-    try:
-        fetcher = BinancePerpetualFetcher()
-        df = fetcher.get_klines(symbol, interval=timeframe, limit=limit)
-        return df
-    except Exception as e:
-        print(f"Error fetching perpetual data for {symbol}: {e}")
-        return None
-
-def check_price_vs_zlsma_perpetual(symbol, length=200, timeframe='15m', limit=500, trade_type='long'):
-    """
-    Check ZLSMA condition - NO candle count limitation here
-    This function only checks if current price is above/below ZLSMA based on trade_type
-    """
-    df = fetch_perpetual_data(symbol, timeframe, limit)
-    if df is None or len(df) < 2 * length - 1:
-        return None
-    
-    df = calculate_zlsma(df, close_column='close', timestamp_column='timestamp', length=length, plot=False)
-    
-    latest_row = df.iloc[-1]
-    current_price = latest_row['close']
-    zlsma_value = latest_row[f'zlsma_{length}']
-    
-    if pd.isna(zlsma_value):
-        return None
-    
-    # Simple ZLSMA condition check - no candle count involved
-    if trade_type.lower() == 'long':
-        condition_met = current_price > zlsma_value
-        price_distance = current_price - zlsma_value
-    else:  # short
-        condition_met = current_price < zlsma_value
-        price_distance = zlsma_value - current_price
-    
-    if condition_met:
-        return {
-            'symbol': symbol,
-            'current_price': current_price,
-            'zlsma_200': zlsma_value,
-            'price_distance_zlsma': price_distance,
-            'trade_type': trade_type.upper(),
-            'contract_type': 'PERPETUAL'
-        }
-    
-    return None
-
-######## Simplified Momentum Indicator (replacing Chandelier Exit) ########
-
-def simple_momentum_signal(df: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
-    """
-    Simplified momentum signal without ATR calculations
-    Uses simple price momentum and moving average crossovers
-    """
-    df_result = df.copy()
-    
-    # Simple momentum calculation
-    df_result['momentum'] = df['close'].pct_change(lookback)
-    
-    # Simple moving averages for trend direction
-    df_result['sma_fast'] = df['close'].rolling(window=5).mean()
-    df_result['sma_slow'] = df['close'].rolling(window=20).mean()
-    
-    # Generate signals based on momentum and trend
-    # Buy signal: positive momentum + fast MA > slow MA
-    buy_condition = (
-        (df_result['momentum'] > 0) & 
-        (df_result['sma_fast'] > df_result['sma_slow']) &
-        (df_result['close'] > df_result['sma_fast'])
-    )
-    
-    # Sell signal: negative momentum + fast MA < slow MA
-    sell_condition = (
-        (df_result['momentum'] < 0) & 
-        (df_result['sma_fast'] < df_result['sma_slow']) &
-        (df_result['close'] < df_result['sma_fast'])
-    )
-    
-    df_result['buy_signal'] = buy_condition.astype(int)
-    df_result['sell_signal'] = sell_condition.astype(int)
-    
-    # Direction based on signals
-    df_result['direction'] = np.where(buy_condition, 1, np.where(sell_condition, -1, 0))
-    
-    return df_result
-
-def calculate_simple_momentum(in_df: pd.DataFrame, lookback: int = 10, timestamp_column: str = None) -> pd.DataFrame:
-    df = in_df.copy()
-
-    if timestamp_column is None:
-        for cand in ['timestamp', 'time', 'date', 'datetime', 'Date', 'Time', 'DateTime']:
-            if cand in df.columns:
-                timestamp_column = cand
-                break
-
-    if timestamp_column is not None and timestamp_column in df.columns:
-        df[timestamp_column] = pd.to_datetime(df[timestamp_column])
-        df['timestamp'] = df[timestamp_column]
-    else:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df['timestamp'] = df.index
-        else:
-            df['timestamp'] = df.index
-
-    missing = [c for c in ['high', 'low', 'close'] if c not in df.columns]
-    if missing:
-        raise ValueError(f"calculate_simple_momentum: Missing required columns: {missing}")
-
-    df_momentum = simple_momentum_signal(df, lookback=lookback)
-
-    if 'timestamp' not in df_momentum.columns:
-        df_momentum['timestamp'] = df_momentum.index
-
-    return df_momentum
-
-class SimplePerpetualScanner:
-    def __init__(self):
-        self.fetcher = BinancePerpetualFetcher()
-    
-    def get_perpetual_klines(self, symbol, timeframe='15m', limit=100):
-        """Get perpetual klines data"""
-        try:
-            df = self.fetcher.get_klines(symbol, interval=timeframe, limit=limit)
-            if df is None or len(df) < 30:
-                return None
-            return df
         except Exception as e:
-            print(f"Error fetching perpetual data for {symbol}: {e}")
-            return None
-    
-    def count_consecutive_signals(self, df, signal_type='buy'):
-        """Count consecutive signals - THIS IS WHERE max_signal_candles applies"""
-        if df is None or len(df) < 2:
-            return False, 0, None
-        
-        signal_column = f"{signal_type}_signal"
-        current_signal = df[signal_column].iloc[-1]
-        if current_signal != 1:
-            return False, 0, None
-        
-        consecutive_count = 0
-        signal_start_idx = None
-        
-        # Count consecutive signals from the latest candle backward
-        for i in range(len(df) - 1, -1, -1):
-            if df[signal_column].iloc[i] == 1:
-                consecutive_count += 1
-                if signal_start_idx is None:
-                    signal_start_idx = i
-            else:
-                break
-        
-        return True, consecutive_count, signal_start_idx
-    
-    def check_momentum_signal_perpetual(self, symbol, timeframe='15m', limit=100, max_signal_candles=3, trade_type='long'):
-        """
-        Check momentum signal with candle count limitation
-        max_signal_candles ONLY applies here for momentum signals
-        """
-        try:
-            df = self.get_perpetual_klines(symbol, timeframe, limit)
-            if df is None:
-                return None
-            
-            df = calculate_simple_momentum(df, lookback=10)
-            
-            signal_type = 'buy' if trade_type.lower() == 'long' else 'sell'
-            is_signal_active, consecutive_count, signal_start_idx = self.count_consecutive_signals(df, signal_type)
-            
-            # KEY CHANGE: max_signal_candles only applies to momentum signals
-            if is_signal_active and consecutive_count <= max_signal_candles:
-                current_price = df['close'].iloc[-1]
-                signal_start_time = df['timestamp'].iloc[signal_start_idx]
-                current_time = df['timestamp'].iloc[-1]
-                
-                opposite_signal_type = 'sell' if signal_type == 'buy' else 'buy'
-                prev_opposite_idx = None
-                for j in range(signal_start_idx - 1, -1, -1):
-                    if df[f'{opposite_signal_type}_signal'].iloc[j] == 1:
-                        prev_opposite_idx = j
-                        break
-                
-                return {
-                    'symbol': symbol,
-                    'current_price': current_price,
-                    'current_signal': signal_type.upper(),
-                    'signal_candles_count': consecutive_count,
-                    'signal_start_time': signal_start_time,
-                    'current_time': current_time,
-                    'prev_opposite_time': df['timestamp'].iloc[prev_opposite_idx] if prev_opposite_idx else None,
-                    'prev_opposite_price': df['close'].iloc[prev_opposite_idx] if prev_opposite_idx else None,
-                    'momentum': df['momentum'].iloc[-1],
-                    'sma_fast': df['sma_fast'].iloc[-1],
-                    'sma_slow': df['sma_slow'].iloc[-1],
-                    'market_type': 'PERPETUAL',
-                    'trade_type': trade_type.upper(),
-                    'contract_type': 'PERPETUAL'
-                }
-            
-            return None
-            
-        except Exception as e:
-            print(f"Error checking momentum signal for {symbol}: {e}")
+            print(f"Unexpected error for {symbol}: {e}")
             return None
 
-def scan_perpetual_simple(symbols, timeframe='15m', zlsma_length=200, zlsma_limit=500, momentum_limit=100, max_signal_candles=3, trade_type='both'):
+def fetch_binance_data(symbol, timeframe='15m', limit=500):
     """
-    Modified perpetual scan with clear separation:
-    1. max_signal_candles applies ONLY to momentum signals (Step 1)
-    2. ZLSMA check is independent of candle count (Step 2)
+    Fetch historical candlestick data from Binance Perpetual Futures
     
     Parameters:
-    symbols: list - List of symbols to scan (e.g., ['BTCUSDT', 'ETHUSDT'])
-    timeframe: str - Timeframe for analysis (default '15m')
-    zlsma_length: int - ZLSMA period (default 200)
-    zlsma_limit: int - Candles for ZLSMA calculation (default 500)
-    momentum_limit: int - Candles for momentum analysis (default 100)
-    max_signal_candles: int - Max consecutive signal candles (ONLY for momentum, default 3)
-    trade_type: str - 'long', 'short', or 'both' (default 'both')
+    symbol: str - Trading pair (e.g., 'BTCUSDT' or 'BTC')
+    timeframe: str - Candlestick timeframe (default '15m')
+    limit: int - Number of candles to fetch (default 500)
     
     Returns:
-    pandas DataFrame - Filtered results
+    pandas DataFrame - OHLCV data with timestamp and close price
     """
-    if not symbols:
-        return pd.DataFrame()
-    
-    trade_types_to_check = []
-    if trade_type.lower() in ['long', 'both']:
-        trade_types_to_check.append('long')
-    if trade_type.lower() in ['short', 'both']:
-        trade_types_to_check.append('short')
-    
-    if not trade_types_to_check:
-        print("Invalid trade_type. Must be 'long', 'short', or 'both'")
-        return pd.DataFrame()
-    
-    # Normalize symbol names
     fetcher = BinancePerpetualFetcher()
-    normalized_coins = []
-    for coin in symbols:
-        normalized_symbol = fetcher._format_symbol(coin)
-        normalized_coins.append(normalized_symbol)
+    return fetcher.get_klines(symbol, timeframe, limit)
+
+######## Signal Detection Functions ########
+
+def check_chandelier_buy_signal(df, max_signal_candles):
+    """
+    Check if current signal is buy and within max_signal_candles limit
+    Returns: (is_buy, consecutive_count)
+    """
+    if df is None or len(df) < 2:
+        return False, 0
     
-    all_final_results = []
+    current_signal = df['buy_signal'].iloc[-1]
+    if current_signal != 1:
+        return False, 0
     
-    for current_trade_type in trade_types_to_check:
-        print(f"\n🔍 Scanning for {current_trade_type.upper()} opportunities...")
+    # Count consecutive buy signals from the end
+    consecutive_count = 0
+    for i in range(len(df) - 1, -1, -1):
+        if df['buy_signal'].iloc[i] == 1:
+            consecutive_count += 1
+        else:
+            break
+    
+    return consecutive_count <= max_signal_candles, consecutive_count
+
+def check_chandelier_sell_signal(df, max_signal_candles):
+    """
+    Check if current signal is sell and within max_signal_candles limit
+    Returns: (is_sell, consecutive_count)
+    """
+    if df is None or len(df) < 2:
+        return False, 0
+    
+    current_signal = df['sell_signal'].iloc[-1]
+    if current_signal != 1:
+        return False, 0
+    
+    # Count consecutive sell signals from the end
+    consecutive_count = 0
+    for i in range(len(df) - 1, -1, -1):
+        if df['sell_signal'].iloc[i] == 1:
+            consecutive_count += 1
+        else:
+            break
+    
+    return consecutive_count <= max_signal_candles, consecutive_count
+
+def find_buy_signal_start(df):
+    """Find the index where the current buy signal started"""
+    if df is None or len(df) < 2:
+        return None
+    
+    signal_start_idx = None
+    for i in range(len(df) - 1, -1, -1):
+        if df['buy_signal'].iloc[i] == 1:
+            signal_start_idx = i
+        else:
+            break
+    
+    return signal_start_idx
+
+def find_sell_signal_start(df):
+    """Find the index where the current sell signal started"""
+    if df is None or len(df) < 2:
+        return None
+    
+    signal_start_idx = None
+    for i in range(len(df) - 1, -1, -1):
+        if df['sell_signal'].iloc[i] == 1:
+            signal_start_idx = i
+        else:
+            break
+    
+    return signal_start_idx
+
+def find_previous_sell_signal(df, signal_start_idx):
+    """Find the previous sell signal before current buy signal"""
+    if df is None or signal_start_idx is None:
+        return {'prev_sell_time': None, 'prev_sell_price': None}
+    
+    for i in range(signal_start_idx - 1, -1, -1):
+        if df['sell_signal'].iloc[i] == 1:
+            return {
+                'prev_sell_time': df['timestamp'].iloc[i],
+                'prev_sell_price': df['close'].iloc[i]
+            }
+    
+    return {'prev_sell_time': None, 'prev_sell_price': None}
+
+def find_previous_buy_signal(df, signal_start_idx):
+    """Find the previous buy signal before current sell signal"""
+    if df is None or signal_start_idx is None:
+        return {'prev_buy_time': None, 'prev_buy_price': None}
+    
+    for i in range(signal_start_idx - 1, -1, -1):
+        if df['buy_signal'].iloc[i] == 1:
+            return {
+                'prev_buy_time': df['timestamp'].iloc[i],
+                'prev_buy_price': df['close'].iloc[i]
+            }
+    
+    return {'prev_buy_time': None, 'prev_buy_price': None}
+
+######## Main Analysis Functions ########
+
+def analyze_single_coin(symbol, timeframe='15m', chandelier_limit=200, zlsma_limit=1000, 
+                       atr_period=1, atr_multiplier=2.0, zlsma_length=200, max_signal_candles=3,
+                       signal_type='both'):
+    """
+    Analyze a single coin with both Chandelier Exit and ZLSMA indicators (Perpetual Futures)
+    
+    Parameters:
+    symbol: str - Trading pair (e.g., 'BTCUSDT' or 'BTC')
+    timeframe: str - Timeframe for analysis (default '15m')
+    chandelier_limit: int - Number of candles for Chandelier analysis (default 200)
+    zlsma_limit: int - Number of candles for ZLSMA calculation (default 1000)
+    atr_period: int - ATR period for Chandelier (default 1)
+    atr_multiplier: float - ATR multiplier for Chandelier (default 2.0)
+    zlsma_length: int - ZLSMA period (default 200)
+    max_signal_candles: int - Maximum consecutive signal candles to consider (default 3)
+    signal_type: str - 'buy', 'sell', or 'both' (default 'both')
+    
+    Returns:
+    dict - Analysis results or None if failed
+    """
+    try:
+        # Normalize symbol
+        if isinstance(symbol, str):
+            symbol = symbol.upper().strip()
+            if not symbol.endswith('USDT') and '/' not in symbol:
+                symbol = f"{symbol}USDT"
         
-        # Step 1: Momentum Signal Filter (WITH max_signal_candles limit)
-        scanner = SimplePerpetualScanner()
-        momentum_passed_coins = []
-        momentum_results = []
+        #print(f"Analyzing {symbol} (PERP)...")
         
-        print(f"⚡ Step 1: Checking Momentum signals (max {max_signal_candles} candles) on {len(normalized_coins)} coins...")
+        # Calculate minimum required data for ZLSMA
+        min_required = 2 * zlsma_length - 1
+        actual_limit = max(zlsma_limit, min_required + 50)  # Add buffer
         
-        for symbol in normalized_coins:
-            momentum_result = scanner.check_momentum_signal_perpetual(
-                symbol,
-                timeframe=timeframe,
-                limit=momentum_limit,
-                max_signal_candles=max_signal_candles,  # Only applies to momentum
-                trade_type=current_trade_type
-            )
-            
-            if momentum_result is not None:
-                momentum_passed_coins.append(symbol)
-                momentum_results.append(momentum_result)
-                print(f"✅ {symbol} passed Momentum filter ({momentum_result['signal_candles_count']} candles)")
-            
-            time.sleep(0.05)
+        #print(f"  Fetching {actual_limit} candles for ZLSMA calculation...")
         
-        if not momentum_passed_coins:
-            print(f"❌ No coins passed Momentum filter (within {max_signal_candles} candles) for {current_trade_type}")
-            continue
+        # Step 1: Fetch data for ZLSMA (needs more data)
+        df_zlsma = fetch_binance_data(symbol, timeframe, actual_limit)
+        if df_zlsma is None:
+            print(f"  Failed to fetch ZLSMA data for {symbol}")
+            return None
         
-        print(f"📊 {len(momentum_passed_coins)} coins passed Momentum filter")
+        #print(f"  Got {len(df_zlsma)} candles, calculating ZLSMA({zlsma_length})...")
         
-        # Step 2: ZLSMA Filter (NO candle count limitation)
-        print(f"📈 Step 2: Checking ZLSMA {zlsma_length} condition (no candle limit) on {len(momentum_passed_coins)} coins...")
+        # Step 2: Calculate ZLSMA
+        df_zlsma = calculate_zlsma(df_zlsma, close_column='close', timestamp_column='timestamp', 
+                                  length=zlsma_length, plot=False)
         
-        for symbol in momentum_passed_coins:
-            zlsma_result = check_price_vs_zlsma_perpetual(
-                symbol, 
-                length=zlsma_length, 
-                timeframe=timeframe, 
-                limit=zlsma_limit,
-                trade_type=current_trade_type
-            )
-            
-            if zlsma_result is not None:
-                # Combine Momentum and ZLSMA data
-                momentum_data = next((c for c in momentum_results if c['symbol'] == symbol), None)
-                
-                if momentum_data:
-                    combined_result = {**momentum_data, **{
-                        f'zlsma_{zlsma_length}': zlsma_result['zlsma_200'],
-                        'price_distance_zlsma': zlsma_result['price_distance_zlsma']
-                    }}
-                    all_final_results.append(combined_result)
-                    print(f"🎯 {symbol} - FINAL CANDIDATE! Passed both filters!")
+        # Get current price and ZLSMA value
+        latest_zlsma = df_zlsma.iloc[-1]
+        current_price = latest_zlsma['close']
+        zlsma_value = latest_zlsma[f'zlsma_{zlsma_length}']
+        
+        #print(f"  Current price: {current_price:.4f}, ZLSMA: {zlsma_value}")
+        
+        if pd.isna(zlsma_value):
+            print(f"  {symbol}: ZLSMA value is still NaN - insufficient data or calculation error")
+            # Try to find the last valid ZLSMA value
+            zlsma_series = df_zlsma[f'zlsma_{zlsma_length}']
+            valid_zlsma = zlsma_series.dropna()
+            if len(valid_zlsma) > 0:
+                zlsma_value = valid_zlsma.iloc[-1]
+                print(f"  Using last valid ZLSMA: {zlsma_value:.4f}")
             else:
-                print(f"❌ {symbol} failed ZLSMA {zlsma_length} filter")
-            
-            time.sleep(0.05)
+                print(f"  No valid ZLSMA values found - skipping {symbol}")
+                return None
+        
+        # Step 3: Fetch data for Chandelier Exit (can use less data)
+        df_chandelier = fetch_binance_data(symbol, timeframe, chandelier_limit)
+        if df_chandelier is None:
+            print(f"  Failed to fetch Chandelier data for {symbol}")
+            return None
+        
+        # Step 4: Calculate Chandelier Exit
+        df_chandelier = calculate_chandelier(
+            df_chandelier,
+            atr_period=atr_period,
+            atr_multiplier=atr_multiplier,
+            use_close=True
+        )
+        
+        # Step 5: Check both buy and sell signals
+        buy_active, buy_count = check_chandelier_buy_signal(df_chandelier, max_signal_candles)
+        sell_active, sell_count = check_chandelier_sell_signal(df_chandelier, max_signal_candles)
+        
+        # Determine which signal to process based on signal_type
+        signal_to_process = None
+        if signal_type == 'buy' and buy_active:
+            signal_to_process = 'BUY'
+        elif signal_type == 'sell' and sell_active:
+            signal_to_process = 'SELL'
+        elif signal_type == 'both':
+            if buy_active:
+                signal_to_process = 'BUY'
+            elif sell_active:
+                signal_to_process = 'SELL'
+        
+        if not signal_to_process:
+            #print(f"  {symbol}: No active {signal_type} signal")
+            return None
+        
+        # Step 6: Apply ZLSMA filter based on signal direction
+        if signal_to_process == 'BUY':
+            if current_price <= zlsma_value:
+                #print(f"  {symbol}: BUY signal but price {current_price:.4f} not above ZLSMA {zlsma_value:.4f}")
+                return None
+            consecutive_count = buy_count
+            signal_start_idx = find_buy_signal_start(df_chandelier)
+        else:  # SELL signal
+            if current_price >= zlsma_value:
+                #print(f"  {symbol}: SELL signal but price {current_price:.4f} not below ZLSMA {zlsma_value:.4f}")
+                return None
+            consecutive_count = sell_count
+            signal_start_idx = find_sell_signal_start(df_chandelier)
+        
+        # Step 7: Compile results
+        result = {
+            'symbol': symbol,
+            'current_price': current_price,
+            'zlsma_value': zlsma_value,
+            'price_vs_zlsma': current_price - zlsma_value,
+            'zlsma_percentage': ((current_price - zlsma_value) / zlsma_value) * 100,
+            'current_signal': signal_to_process,
+            'signal_candles_count': consecutive_count,
+            'signal_start_time': df_chandelier['timestamp'].iloc[signal_start_idx] if signal_start_idx else None,
+            'current_time': df_chandelier['timestamp'].iloc[-1],
+            'atr_value': df_chandelier['atr'].iloc[-1],
+            'long_stop': df_chandelier['long_stop'].iloc[-1],
+            'short_stop': df_chandelier['short_stop'].iloc[-1],
+            'chandelier_exit': df_chandelier['chandelier_exit'].iloc[-1]
+        }
+        
+        # Add previous opposite signal info
+        if signal_to_process == 'BUY':
+            prev_signal_info = find_previous_sell_signal(df_chandelier, signal_start_idx)
+            result.update(prev_signal_info)
+            #print(f"  ✓ {symbol}: BUY signal ({consecutive_count} candles), Price above ZLSMA by {result['zlsma_percentage']:.2f}%")
+        else:
+            prev_signal_info = find_previous_buy_signal(df_chandelier, signal_start_idx)
+            result.update(prev_signal_info)
+            #print(f"  ✓ {symbol}: SELL signal ({consecutive_count} candles), Price below ZLSMA by {abs(result['zlsma_percentage']):.2f}%")
+        
+        return result
+        
+    except Exception as e:
+        print(f"  Error analyzing {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def scan_multiple_coins(coin_list, timeframe='15m', chandelier_limit=200, zlsma_limit=1000,
+                       atr_period=1, atr_multiplier=2.0, zlsma_length=200, max_signal_candles=3,
+                       signal_type='both'):
+    """
+    Scan multiple coins with Chandelier Exit and ZLSMA analysis (Perpetual Futures)
     
-    if not all_final_results:
-        print("❌ No trading opportunities found after both filters")
+    Parameters:
+    coin_list: list - List of coins to scan (e.g., ['BTC', 'ETH', 'ADA'] or ['BTCUSDT', 'ETHUSDT'])
+    timeframe: str - Timeframe for analysis (default '15m')
+    chandelier_limit: int - Number of candles for Chandelier analysis (default 200)
+    zlsma_limit: int - Number of candles for ZLSMA calculation (default 1000)
+    atr_period: int - ATR period for Chandelier (default 1)
+    atr_multiplier: float - ATR multiplier for Chandelier (default 2.0)
+    zlsma_length: int - ZLSMA period (default 200)
+    max_signal_candles: int - Maximum consecutive signal candles to consider (default 3)
+    signal_type: str - 'buy', 'sell', or 'both' (default 'both')
+    
+    Returns:
+    pandas DataFrame - Scan results sorted by signal_candles_count
+    """
+    if not coin_list:
+        print("No coins provided for scanning")
         return pd.DataFrame()
     
-    # Create results DataFrame
-    results_df = pd.DataFrame(all_final_results)
-    results_df = results_df.sort_values(['trade_type', 'signal_candles_count', 'price_distance_zlsma'], 
-                                    ascending=[True, True, False])
+    signal_desc = signal_type.upper() if signal_type != 'both' else 'BUY/SELL'
     
-    print(f"\n🎉 Found {len(results_df)} final trading opportunities!")
-    print(f"💡 Note: max_signal_candles={max_signal_candles} was applied only to momentum signals")
-    print(f"📊 ZLSMA {zlsma_length} filter was applied without candle count limitation")
+    #print(f"Starting scan of {len(coin_list)} coins on PERPETUAL FUTURES...")
+    #print(f"Parameters: {timeframe} timeframe, ZLSMA({zlsma_length}), Chandelier({atr_period}, {atr_multiplier})")
+    #print(f"Looking for: {signal_desc} signals, Max signal candles: {max_signal_candles}")
+    #print("-" * 80)
     
-    return results_df
+    results = []
+    
+    for i, coin in enumerate(coin_list, 1):
+        #print(f"[{i}/{len(coin_list)}] ", end="")
+        
+        result = analyze_single_coin(
+            coin, timeframe, chandelier_limit, zlsma_limit,
+            atr_period, atr_multiplier, zlsma_length, max_signal_candles, signal_type
+        )
+        
+        if result:
+            results.append(result)
+        
+        # Rate limiting
+        time.sleep(0.1)
+    
+    print("-" * 80)
+    print(f"Scan complete. Found {len(results)} coins matching criteria.")
+    
+    if results:
+        df = pd.DataFrame(results)
+        df = df.sort_values('signal_candles_count')
+        return df
+    else:
+        return pd.DataFrame()
+
+######## Convenience Functions ########
+
+def scan_buy_signals_only(coin_list, **kwargs):
+    """Convenience function to scan for buy signals only"""
+    return scan_multiple_coins(coin_list, signal_type='buy', **kwargs)
+
+def scan_sell_signals_only(coin_list, **kwargs):
+    """Convenience function to scan for sell signals only"""
+    return scan_multiple_coins(coin_list, signal_type='sell', **kwargs)
+
+def scan_all_signals(coin_list, **kwargs):
+    """Convenience function to scan for both buy and sell signals"""
+    return scan_multiple_coins(coin_list, signal_type='both', **kwargs)
+
+######## Advanced Scanner Class ########
+
+class PerpetualFuturesScanner:
+    """
+    Advanced scanner class for Binance Perpetual Futures with Chandelier Exit and ZLSMA
+    """
+    
+    def __init__(self, atr_period=1, atr_multiplier=2.0, zlsma_length=200):
+        self.atr_period = atr_period
+        self.atr_multiplier = atr_multiplier
+        self.zlsma_length = zlsma_length
+        self.fetcher = BinancePerpetualFetcher()
+        
+    def scan_coins(self, coin_list, timeframe='15m', max_signal_candles=3, signal_type='both'):
+        """Scan coins with current settings"""
+        return scan_multiple_coins(
+            coin_list=coin_list,
+            timeframe=timeframe,
+            atr_period=self.atr_period,
+            atr_multiplier=self.atr_multiplier,
+            zlsma_length=self.zlsma_length,
+            max_signal_candles=max_signal_candles,
+            signal_type=signal_type
+        )
+    
+    def analyze_coin(self, symbol, timeframe='15m', max_signal_candles=3, signal_type='both'):
+        """Analyze a single coin with current settings"""
+        return analyze_single_coin(
+            symbol=symbol,
+            timeframe=timeframe,
+            atr_period=self.atr_period,
+            atr_multiplier=self.atr_multiplier,
+            zlsma_length=self.zlsma_length,
+            max_signal_candles=max_signal_candles,
+            signal_type=signal_type
+        )
+    
+    def update_settings(self, atr_period=None, atr_multiplier=None, zlsma_length=None):
+        """Update scanner settings"""
+        if atr_period is not None:
+            self.atr_period = atr_period
+        if atr_multiplier is not None:
+            self.atr_multiplier = atr_multiplier
+        if zlsma_length is not None:
+            self.zlsma_length = zlsma_length
+            
+            
+
+# results_both = scan_multiple_coins(
+#     coin_list=custom_coins,
+#     timeframe='15m',
+#     chandelier_limit=200,
+#     zlsma_limit=500,
+#     atr_period=1,
+#     atr_multiplier=2.0,
+#     zlsma_length=200,
+#     max_signal_candles=3,
+#     signal_type='both'
+# )
 
 
-# # Example usage with clear explanation
-# if __name__ == "__main__":
-#     # Example symbols to scan
-#     symbols = ['BTC', 'ETH', 'BNB', 'ADA', 'SOL', 'DOT', 'MATIC', 'LINK', 'AVAX', 'ATOM']
-    
-#     print("="*80)
-#     print("PERPETUAL SCANNER - MODIFIED LOGIC")
-#     print("="*80)
-#     print("Step 1: Momentum Signal Check (max_signal_candles=3 applies here)")
-#     print("Step 2: ZLSMA 200 Check (no candle limitation)")
-#     print("="*80)
-    
-#     # Run the scan
-#     start_time = time.time()
-    
-#     results = scan_perpetual_simple(
-#         symbols=symbols,
-#         timeframe='15m',
-#         zlsma_length=200,      # ZLSMA period
-#         zlsma_limit=500,       # Candles for ZLSMA calculation
-#         momentum_limit=100,    # Candles for momentum analysis
-#         max_signal_candles=3,  # ONLY applies to momentum signals
-#         trade_type='both'      # 'long', 'short', or 'both'
-#     )
-    
-#     scan_time = time.time() - start_time
-    
-#     if not results.empty:
-#         print("\n" + "="*80)
-#         print("FINAL RESULTS:")
-#         print("="*80)
-#         for idx, row in results.iterrows():
-#             print(f"\n🎯 {row['symbol']} - {row['trade_type']} Signal")
-#             print(f"   Current Price: ${row['current_price']:.4f}")
-#             print(f"   Momentum Signal Candles: {row['signal_candles_count']} (≤3)")
-#             print(f"   ZLSMA 200: ${row['zlsma_200']:.4f}")
-#             print(f"   Price Distance from ZLSMA: ${row['price_distance_zlsma']:.4f}")
-#             print(f"   Momentum: {row['momentum']:.4f}")
-#     else:
-#         print("\n❌ No opportunities found!")
-    
-#     print(f"\n⏱️ Total scan time: {scan_time:.2f} seconds")
-#     print(f"📊 Average time per symbol: {scan_time/len(symbols):.2f} seconds")
+# results_buy = scan_multiple_coins(
+#     coin_list=custom_coins,
+#     signal_type='buy'
+# )
+
+
+
+# results_sell = scan_multiple_coins(
+#     coin_list=custom_coins,
+#     signal_type='sell'
+# )
