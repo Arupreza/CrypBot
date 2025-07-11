@@ -519,14 +519,14 @@ class RealTimeTradeTracker:
             
             # Update liquidation line color based on distance
             if liquidation_distance < 5:
-                self.hlines['liquidation'].set_color('red')
+                self.hlines['liquidation'].set_color('orange')
                 self.hlines['liquidation'].set_alpha(1.0)
             elif liquidation_distance < 10:
                 self.hlines['liquidation'].set_color('orange')
-                self.hlines['liquidation'].set_alpha(0.9)
+                self.hlines['liquidation'].set_alpha(0.6)
             else:
-                self.hlines['liquidation'].set_color('red')
-                self.hlines['liquidation'].set_alpha(0.7)
+                self.hlines['liquidation'].set_color('orange')
+                self.hlines['liquidation'].set_alpha(0.4)
         
         # Redraw legend with updated current price
         self.ax1.legend(loc='upper left', fontsize=18, framealpha=0.9, markerscale=1.5)
