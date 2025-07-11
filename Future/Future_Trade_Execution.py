@@ -797,6 +797,7 @@ class SelfMonitoringFuturesTrader:
         - Uses tiered maintenance margin rates
         - Applies multiple safety buffers (volatility + slippage + user buffer)
         - Real-time position monitoring
+        - Pre-trade stop loss vs liquidation check
         
         Args:
             coin: Trading symbol
@@ -1049,24 +1050,46 @@ class SelfMonitoringFuturesTrader:
             safe_stop_loss = self._calculate_ultra_safe_stop_loss(
                 current_price, calculated_liquidation_price, side, initial_stop_loss, liquidation_buffer)
             
+            # 🛡️ NEW: Pre-trade stop loss vs liquidation price check
+            if side == 'long':
+                if safe_stop_loss <= calculated_liquidation_price:
+                    stop_to_liq_distance = ((safe_stop_loss - calculated_liquidation_price) / current_price) * 100
+                    logger.error(f"❌ TRADE REJECTED: Stop loss crosses liquidation price!")
+                    logger.error(f"   Current Price: ${current_price:.8f}")
+                    logger.error(f"   Stop Loss: ${safe_stop_loss:.8f}")
+                    logger.error(f"   Liquidation Price: ${calculated_liquidation_price:.8f}")
+                    logger.error(f"   Distance (Stop to Liq): {stop_to_liq_distance:.2f}%")
+                    logger.error("   Reduce leverage or adjust stop loss parameters!")
+                    return False
+            else:  # short
+                if safe_stop_loss >= calculated_liquidation_price:
+                    stop_to_liq_distance = ((calculated_liquidation_price - safe_stop_loss) / current_price) * 100
+                    logger.error(f"❌ TRADE REJECTED: Stop loss crosses liquidation price!")
+                    logger.error(f"   Current Price: ${current_price:.8f}")
+                    logger.error(f"   Stop Loss: ${safe_stop_loss:.8f}")
+                    logger.error(f"   Liquidation Price: ${calculated_liquidation_price:.8f}")
+                    logger.error(f"   Distance (Stop to Liq): {stop_to_liq_distance:.2f}%")
+                    logger.error("   Reduce leverage or adjust stop loss parameters!")
+                    return False
+            
             # Pre-execution safety validation
             if side == 'long':
                 pre_liq_distance = ((current_price - calculated_liquidation_price) / current_price) * 100
                 stop_to_liq_distance = ((safe_stop_loss - calculated_liquidation_price) / current_price) * 100
-                if pre_liq_distance < (liquidation_buffer + 0.5) or stop_to_liq_distance < 2:
+                if pre_liq_distance < 1.5 or stop_to_liq_distance < 2:
                     logger.error(f"❌ POSITION TOO RISKY: Liquidation too close!")
                     logger.error(f"   Liquidation distance: {pre_liq_distance:.2f}%")
                     logger.error(f"   Stop to liquidation: {stop_to_liq_distance:.2f}%")
-                    logger.error(f"   Required minimum: {liquidation_buffer + 1:.1f}%")
+                    logger.error(f"   Required minimum: 1.5%")
                     return False
             else:
                 pre_liq_distance = ((calculated_liquidation_price - current_price) / current_price) * 100
                 stop_to_liq_distance = ((calculated_liquidation_price - safe_stop_loss) / current_price) * 100
-                if pre_liq_distance < (liquidation_buffer + 1) or stop_to_liq_distance < 2:
+                if pre_liq_distance < 1.5 or stop_to_liq_distance < 2:
                     logger.error(f"❌ POSITION TOO RISKY: Liquidation too close!")
                     logger.error(f"   Liquidation distance: {pre_liq_distance:.2f}%")
                     logger.error(f"   Stop to liquidation: {stop_to_liq_distance:.2f}%")
-                    logger.error(f"   Required minimum: {liquidation_buffer + 1:.1f}%")
+                    logger.error(f"   Required minimum: 1.5%")
                     return False
             
             logger.info(f"📊 Strategy levels:")
@@ -1139,7 +1162,7 @@ class SelfMonitoringFuturesTrader:
                 logger.info(f"🛡️ ACTUAL Liquidation Distance: {liq_distance_pct:.2f}%")
                 
                 # SAFETY CHECK: Ensure minimum liquidation distance with actual price
-                min_required_distance = liquidation_buffer + 1  # Extra 1% safety margin
+                min_required_distance = 1.5  # Changed to 1.5% default
                 if liq_distance_pct < min_required_distance:
                     logger.error(f"❌ POSITION TOO RISKY: Liquidation too close!")
                     logger.error(f"   Required distance: {min_required_distance:.1f}%")
@@ -1154,7 +1177,7 @@ class SelfMonitoringFuturesTrader:
                 # Final safety validation with ACTUAL liquidation price
                 if side == 'long':
                     stop_to_liq_distance = ((safe_stop_loss - final_liquidation_price) / entry_price) * 100
-                    if stop_to_liq_distance < 2:
+                    if stop_to_liq_distance < 1.0:
                         logger.error(f"❌ STOP LOSS TOO RISKY: Too close to liquidation!")
                         logger.error(f"   Stop to liquidation distance: {stop_to_liq_distance:.2f}%")
                         logger.error(f"   Closing position for safety...")
@@ -1163,7 +1186,7 @@ class SelfMonitoringFuturesTrader:
                         return False
                 else:
                     stop_to_liq_distance = ((final_liquidation_price - safe_stop_loss) / entry_price) * 100
-                    if stop_to_liq_distance < 2:
+                    if stop_to_liq_distance < 1.0:
                         logger.error(f"❌ STOP LOSS TOO RISKY: Too close to liquidation!")
                         logger.error(f"   Stop to liquidation distance: {stop_to_liq_distance:.2f}%")
                         logger.error(f"   Closing position for safety...")
@@ -1485,34 +1508,27 @@ self_monitoring_trader = SelfMonitoringFuturesTrader()
 
 # 🤖 FULLY SELF-MONITORING TRADING EXAMPLES:
 
-
-
 # # Example: 1:2 Risk/Reward ATR system
 # self_monitoring_trader.trade("BTC", 100, leverage=10, side="long", 
 #                         use_atr_stoploss=True, atr_multiplier=2.0, take_profit_ratio=2.0)
 
-
 # # Example: Make exactly $50 profit
 # self_monitoring_trader.trade("ETH", 50, leverage=8, side="long", 
 #                         fixed_tp_dollars=50, use_atr_stoploss=True, atr_multiplier=1.8)
-
 
 # # Example: 3% profit target
 # self_monitoring_trader.trade("SOL", 75, leverage=5, side="short", 
 #                         use_fixed_tp=True, fixed_tp_percent=3.0, 
 #                         use_atr_stoploss=True, atr_multiplier=2.0)
 
-
 # # Example: Swing high/low targets
 # self_monitoring_trader.trade("MATIC", 40, leverage=6, side="long", 
 #                         use_swing_levels=True, swing_lookback=15, 
 #                         use_atr_stoploss=True, atr_multiplier=1.5)
 
-
 # # Example: Classic ATR with 1:2.5 ratio
 # self_monitoring_trader.trade("AVAX", 60, leverage=7, side="long", 
 #                         take_profit_ratio=2.5)
-
 
 # # Example: Swing TP + ATR SL
 # self_monitoring_trader.trade("LINK", 35, leverage=5, side="long", 
@@ -1522,7 +1538,6 @@ self_monitoring_trader = SelfMonitoringFuturesTrader()
 # # Example: Fixed dollar + ATR SL
 # self_monitoring_trader.trade("DOT", 45, leverage=4, side="short", 
 #                         fixed_tp_dollars=30, use_atr_stoploss=True, atr_multiplier=1.6)
-
 
 # 7. Check balance
 # self_monitoring_trader.get_balance()
