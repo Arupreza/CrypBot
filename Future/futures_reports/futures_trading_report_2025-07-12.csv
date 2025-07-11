@@ -1,0 +1,2 @@
+Date,Time,Trade_ID,Action,Coin,Symbol,Side,Leverage,Entry_Price,Liquidation_Price,Quantity,Notional_USD,Margin_Used,Stop_Loss,Take_Profit,TP_Type,Exit_Price,Exit_Time,PnL_USD,PnL_Percent,Exit_Reason,Trade_Duration_Minutes,Expected_TP_Profit,Monitoring_Status,Liquidation_Safety_Buffer
+2025-07-12,00:37:07,PENDLEUSDT_1752248227,ENTRY,PENDLE,PENDLEUSDT,long,20,4.135311458334,3.9658354,96.0,396.989900000064,100,4.07,4.2,Manual Setup,,,,,,,6.210099999936034,COMPLETELY_FIXED_ACTIVE,1.5%

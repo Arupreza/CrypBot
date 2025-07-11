@@ -1469,6 +1469,221 @@ class SelfMonitoringFuturesTrader:
             logger.error(f"❌ Error getting monitoring status: {e}")
             return {}
 
+    def start_monitoring_existing_position(self, coin, stop_loss_price, take_profit_price, 
+                                          tp_type="Manual", margin_used=None):
+        """Start monitoring an existing position that's not currently monitored
+        
+        Args:
+            coin: Trading symbol (e.g., 'BTC', 'BTCUSDT')
+            stop_loss_price: Stop loss price level
+            take_profit_price: Take profit price level
+            tp_type: Description of TP strategy (optional)
+            margin_used: Margin amount used (will estimate if None)
+        
+        Returns:
+            bool: True if successfully added to monitoring, False otherwise
+        """
+        try:
+            symbol, coin_name = self._normalize_coin_input(coin)
+            if not symbol or not coin_name:
+                logger.error(f"❌ Invalid coin input: {coin}")
+                return False
+            
+            # Check if already being monitored
+            for trade in self.active_trades.values():
+                if trade.symbol == symbol:
+                    logger.warning(f"⚠️ {symbol} is already being monitored!")
+                    return False
+            
+            # Get position info from exchange
+            position_info = self.perpetual_fetcher.get_position_info(symbol)
+            
+            if not position_info or position_info.get('positionAmt', 0) == 0:
+                logger.error(f"❌ No active position found for {symbol}")
+                return False
+            
+            position_amount = float(position_info.get('positionAmt', 0))
+            entry_price = float(position_info.get('entryPrice', 0))
+            liquidation_price = float(position_info.get('liquidationPrice', 0))
+            leverage = int(position_info.get('leverage', 1))
+            
+            if position_amount == 0:
+                logger.error(f"❌ No position size for {symbol}")
+                return False
+            
+            # Determine side
+            side = 'long' if position_amount > 0 else 'short'
+            
+            # Estimate margin if not provided
+            if margin_used is None:
+                notional = abs(position_amount * entry_price)
+                margin_used = notional / leverage
+            
+            # Validate stop loss and take profit levels
+            current_price = self._get_ultra_reliable_price(symbol)
+            
+            # Basic validation
+            if side == 'long':
+                if stop_loss_price >= entry_price:
+                    logger.error(f"❌ Stop loss ${stop_loss_price:.8f} must be below entry ${entry_price:.8f} for long")
+                    return False
+                if take_profit_price <= entry_price:
+                    logger.error(f"❌ Take profit ${take_profit_price:.8f} must be above entry ${entry_price:.8f} for long")
+                    return False
+            else:  # short
+                if stop_loss_price <= entry_price:
+                    logger.error(f"❌ Stop loss ${stop_loss_price:.8f} must be above entry ${entry_price:.8f} for short")
+                    return False
+                if take_profit_price >= entry_price:
+                    logger.error(f"❌ Take profit ${take_profit_price:.8f} must be below entry ${entry_price:.8f} for short")
+                    return False
+            
+            # Check liquidation safety
+            if liquidation_price > 0:
+                if side == 'long':
+                    distance_to_liq = ((stop_loss_price - liquidation_price) / entry_price) * 100
+                else:
+                    distance_to_liq = ((liquidation_price - stop_loss_price) / entry_price) * 100
+                
+                if distance_to_liq < 1.0:
+                    logger.error(f"❌ Stop loss too close to liquidation! Distance: {distance_to_liq:.2f}%")
+                    logger.error(f"   Liquidation: ${liquidation_price:.8f}")
+                    logger.error(f"   Stop Loss: ${stop_loss_price:.8f}")
+                    return False
+            
+            # Create active trade for monitoring
+            active_trade = ActiveTrade(
+                symbol=symbol,
+                coin_name=coin_name,
+                side=side,
+                entry_price=entry_price,
+                quantity=position_amount,
+                margin_used=margin_used,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                tp_type=tp_type,
+                liquidation_price=liquidation_price,
+                leverage=leverage,
+                entry_time=datetime.now(),  # Will show as time monitoring started
+                trade_id="",
+                status="ACTIVE",
+                last_price_check=current_price,
+                failed_checks=0,
+                last_successful_check=datetime.now()
+            )
+            
+            # Record trade entry and add to monitoring
+            trade_id = self._record_trade_entry(active_trade)
+            active_trade.trade_id = trade_id
+            self.active_trades[trade_id] = active_trade
+            
+            logger.info(f"✅ STARTED MONITORING EXISTING POSITION: {symbol}")
+            logger.info(f"   Side: {side.upper()}")
+            logger.info(f"   Position Size: {position_amount:.8f}")
+            logger.info(f"   Entry Price: ${entry_price:.8f}")
+            logger.info(f"   🛡️ Stop Loss: ${stop_loss_price:.8f}")
+            logger.info(f"   🎯 Take Profit: ${take_profit_price:.8f}")
+            logger.info(f"   💰 Current Price: ${current_price:.8f}")
+            logger.info(f"   ⚡ Leverage: {leverage}x")
+            if liquidation_price > 0:
+                logger.info(f"   🎯 Liquidation: ${liquidation_price:.8f}")
+                logger.info(f"   🛡️ Safety Distance: {distance_to_liq:.2f}%")
+            logger.info(f"   👁️ Monitoring every {self.monitoring_interval} seconds")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error starting monitoring for existing position: {e}")
+            return False
+
+    def auto_detect_and_monitor_unmonitored_positions(self, default_stop_loss_percent=3.0, 
+                                                    default_take_profit_percent=6.0):
+        """Automatically detect unmonitored positions and offer to start monitoring them
+        
+        Args:
+            default_stop_loss_percent: Default stop loss percentage from entry
+            default_take_profit_percent: Default take profit percentage from entry
+        
+        Returns:
+            list: List of positions that were added to monitoring
+        """
+        try:
+            logger.info("🔍 SCANNING FOR UNMONITORED POSITIONS...")
+            
+            positions = self.exchange.fetch_positions()
+            unmonitored_positions = []
+            newly_monitored = []
+            
+            for position in positions:
+                if float(position.get('contracts', 0)) > 0:
+                    symbol = position.get('symbol')
+                    
+                    # Check if already monitored
+                    is_monitored = any(trade.symbol == symbol for trade in self.active_trades.values())
+                    
+                    if not is_monitored:
+                        pos_data = {
+                            'symbol': symbol,
+                            'side': position.get('side'),
+                            'position_amount': float(position.get('contracts', 0)),
+                            'entry_price': float(position.get('entryPrice', 0)),
+                            'mark_price': float(position.get('markPrice', 0)),
+                            'unrealized_pnl': float(position.get('unrealizedPnl', 0)),
+                            'percentage': float(position.get('percentage', 0))
+                        }
+                        unmonitored_positions.append(pos_data)
+                        
+                        logger.info(f"⚠️ UNMONITORED POSITION FOUND: {symbol}")
+                        logger.info(f"   Side: {pos_data['side'].upper()}")
+                        logger.info(f"   Size: {pos_data['position_amount']:.8f}")
+                        logger.info(f"   Entry: ${pos_data['entry_price']:.8f}")
+                        logger.info(f"   Current PnL: ${pos_data['unrealized_pnl']:.4f} ({pos_data['percentage']:.2f}%)")
+                        
+                        # Calculate default stop loss and take profit
+                        entry_price = pos_data['entry_price']
+                        side = pos_data['side']
+                        
+                        if side == 'long':
+                            default_sl = entry_price * (1 - default_stop_loss_percent / 100)
+                            default_tp = entry_price * (1 + default_take_profit_percent / 100)
+                        else:  # short
+                            default_sl = entry_price * (1 + default_stop_loss_percent / 100)
+                            default_tp = entry_price * (1 - default_take_profit_percent / 100)
+                        
+                        logger.info(f"   📊 Suggested SL: ${default_sl:.8f} ({default_stop_loss_percent}%)")
+                        logger.info(f"   📊 Suggested TP: ${default_tp:.8f} ({default_take_profit_percent}%)")
+                        
+                        # Auto-start monitoring with default levels
+                        coin_name = symbol.replace('USDT', '').replace('BUSD', '').replace('USDC', '')
+                        
+                        if self.start_monitoring_existing_position(
+                            coin_name, default_sl, default_tp, 
+                            f"Auto-detected {default_stop_loss_percent}%SL/{default_take_profit_percent}%TP"
+                        ):
+                            newly_monitored.append(pos_data)
+                            logger.info(f"✅ Auto-started monitoring for {symbol}")
+                        else:
+                            logger.warning(f"⚠️ Could not auto-start monitoring for {symbol}")
+                        
+                        logger.info("   " + "="*50)
+            
+            if not unmonitored_positions:
+                logger.info("✅ All positions are already being monitored!")
+            else:
+                logger.info(f"📊 SUMMARY:")
+                logger.info(f"   Found {len(unmonitored_positions)} unmonitored position(s)")
+                logger.info(f"   Successfully started monitoring {len(newly_monitored)} position(s)")
+                
+                if len(newly_monitored) < len(unmonitored_positions):
+                    failed_count = len(unmonitored_positions) - len(newly_monitored)
+                    logger.warning(f"   ⚠️ Failed to monitor {failed_count} position(s) - check logs above")
+            
+            return newly_monitored
+            
+        except Exception as e:
+            logger.error(f"❌ Error scanning for unmonitored positions: {e}")
+            return []
+
     def stop_all_monitoring(self):
         """Stop monitoring and close all active trades"""
         try:
@@ -1517,6 +1732,30 @@ self_monitoring_trader = SelfMonitoringFuturesTrader()
 
 # Example 5: Classic ATR with 1:2.5 ratio
 # self_monitoring_trader.trade("AVAX", 60, leverage=7, side="long", take_profit_ratio=2.5)
+
+
+# # Start monitoring a specific position with custom levels
+# self_monitoring_trader.start_monitoring_existing_position(
+#     coin="BTC",                    # The coin symbol
+#     stop_loss_price=42000,         # Your exact stop loss price
+#     take_profit_price=48000,       # Your exact take profit price
+#     tp_type="Manual Setup",        # Description (optional)
+#     margin_used=100                # Margin amount (optional, will estimate if None)
+# )
+
+
+
+# # Automatically find and start monitoring ALL unmonitored positions
+# # with default 3% stop loss and 6% take profit
+# newly_monitored = self_monitoring_trader.auto_detect_and_monitor_unmonitored_positions()
+
+# # Or with custom default percentages
+# newly_monitored = self_monitoring_trader.auto_detect_and_monitor_unmonitored_positions(
+#     default_stop_loss_percent=2.5,    # 2.5% stop loss
+#     default_take_profit_percent=5.0   # 5% take profit
+# )
+
+
 
 # 🔧 MONITORING AND MANAGEMENT FUNCTIONS:
 
