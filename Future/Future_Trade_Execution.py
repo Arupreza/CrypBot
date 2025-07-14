@@ -605,7 +605,7 @@ class SelfMonitoringFuturesTrader:
             return False
 
     def _calculate_liquidation_price_fixed(self, entry_price: float, quantity: float, 
-                                         margin_amount: float, side: str, symbol: str) -> float:
+                                        margin_amount: float, side: str, symbol: str) -> float:
         """FIXED: Calculate liquidation price using exact Binance formula"""
         try:
             # Get maintenance margin rate
@@ -630,7 +630,7 @@ class SelfMonitoringFuturesTrader:
             return entry_price * (0.90 if side == 'long' else 1.10)
 
     def _calculate_safe_stop_loss_fixed(self, entry_price: float, liquidation_price: float, 
-                                      side: str, initial_stop: float) -> float:
+                                    side: str, initial_stop: float) -> float:
         """FIXED: Calculate stop loss with EXACTLY 1.5% safety buffer as requested"""
         try:
             if liquidation_price is None or liquidation_price <= 0:
@@ -798,7 +798,7 @@ class SelfMonitoringFuturesTrader:
                     
                     # Calculate trade duration
                     entry_time = datetime.strptime(f"{df.loc[latest_idx, 'Date']} {df.loc[latest_idx, 'Time']}", 
-                                                 "%Y-%m-%d %H:%M:%S")
+                                                "%Y-%m-%d %H:%M:%S")
                     exit_time = datetime.strptime(f"{datetime.now().strftime('%Y-%m-%d')} {datetime.now().strftime('%H:%M:%S')}", 
                                                 "%Y-%m-%d %H:%M:%S")
                     duration_minutes = (exit_time - entry_time).total_seconds() / 60
@@ -872,9 +872,9 @@ class SelfMonitoringFuturesTrader:
             }
 
     def trade(self, coin, margin_amount, leverage=5, side='long', take_profit_ratio=2.0, 
-              use_fixed_tp=False, fixed_tp_percent=2.5, use_swing_levels=False, 
-              swing_lookback=10, fixed_tp_dollars=None, use_atr_stoploss=False, 
-              atr_multiplier=2.0):
+            use_fixed_tp=False, fixed_tp_percent=2.5, use_swing_levels=False, 
+            swing_lookback=10, fixed_tp_dollars=None, use_atr_stoploss=False, 
+            atr_multiplier=2.0):
         """
         🚀 COMPLETELY FIXED SELF-MONITORING LIQUIDATION-SAFE FUTURES TRADER
         
@@ -1470,7 +1470,7 @@ class SelfMonitoringFuturesTrader:
             return {}
 
     def start_monitoring_existing_position(self, coin, stop_loss_price, take_profit_price, 
-                                          tp_type="Manual", margin_used=None):
+                                        tp_type="Manual", margin_used=None):
         """Start monitoring an existing position that's not currently monitored
         
         Args:
@@ -1705,10 +1705,107 @@ class SelfMonitoringFuturesTrader:
         except Exception as e:
             logger.error(f"❌ Error stopping monitoring: {e}")
             return False
+        
+        
+        
+####  Monitoring Module for Futures Positions ####
+        
+        
+        
+import time
+import threading
+import logging
+from datetime import datetime
+from IPython.display import clear_output
+
+# Set up logging to track monitoring activity
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('position_monitor.log'),
+        logging.StreamHandler()
+    ]
+)
+
+class PositionMonitor:
+    def __init__(self, trader_instance, coin, stop_loss_price, take_profit_price):
+        self.trader = trader_instance
+        self.coin = coin
+        self.stop_loss_price = stop_loss_price
+        self.take_profit_price = take_profit_price
+        self.monitoring = False
+        self.thread = None
+        
+    def start_continuous_monitoring(self):
+        """Start monitoring in a separate thread"""
+        if self.monitoring:
+            print("Monitoring is already running!")
+            return
+            
+        self.monitoring = True
+        self.thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self.thread.start()
+        print(f"Position monitoring started for {self.coin} - running every 5 seconds")
+        
+    def stop_monitoring(self):
+        """Stop the monitoring loop"""
+        self.monitoring = False
+        if self.thread:
+            self.thread.join()
+        print("Position monitoring stopped")
+        
+    def _monitoring_loop(self):
+        """Main monitoring loop that runs every 5 seconds"""
+        while self.monitoring:
+            try:
+                # Clear previous output in Jupyter notebook
+                clear_output(wait=True)
+                
+                # Execute the monitoring code with configurable variables
+                self.trader.start_monitoring_existing_position(
+                    coin=self.coin,
+                    stop_loss_price=self.stop_loss_price,
+                    take_profit_price=self.take_profit_price,
+                    tp_type="Manual Setup",
+                    margin_used=100
+                )
+                
+                logging.info(f"Position monitoring executed for {self.coin} at {datetime.now()}")
+                
+            except Exception as e:
+                logging.error(f"Error in monitoring loop: {e}")
+                
+            # Wait 5 seconds before next iteration
+            time.sleep(5)
+            
 
 
 # 🚀 Initialize the COMPLETELY FIXED self-monitoring trader
 self_monitoring_trader = SelfMonitoringFuturesTrader()
+
+
+def get_trade_values():
+    if self_monitoring_trader.active_trades:
+        trade = list(self_monitoring_trader.active_trades.values())[0]
+        return trade.symbol, trade.stop_loss, trade.take_profit
+    return None, None, None
+
+symbol, stop_loss, take_profit = get_trade_values()
+
+# Assuming you have your trader instance
+monitor = PositionMonitor(
+    trader_instance=self_monitoring_trader,
+    coin=symbol,
+    stop_loss_price=stop_loss,
+    take_profit_price=take_profit
+)
+
+
+#monitor.start_continuous_monitoring()
+
+
+
 
 # 🚀 COMPLETELY FIXED TRADING EXAMPLES WITH ALL 4 CRITICAL ISSUES RESOLVED:
 

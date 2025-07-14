@@ -10,43 +10,9 @@ class BinancePerpetualFetcher:
     def __init__(self):
         self.base_url = "https://fapi.binance.com"
     
-    def _format_symbol(self, symbol):
-        """Auto-format common symbols to proper trading pairs"""
-        symbol = symbol.upper().strip()
-        
-        # Common symbol mappings
-        symbol_map = {
-            'BTC': 'BTCUSDT',
-            'ETH': 'ETHUSDT', 
-            'BNB': 'BNBUSDT',
-            'ADA': 'ADAUSDT',
-            'SOL': 'SOLUSDT',
-            'DOT': 'DOTUSDT',
-            'MATIC': 'MATICUSDT',
-            'LINK': 'LINKUSDT',
-            'AVAX': 'AVAXUSDT',
-            'ATOM': 'ATOMUSDT',
-            'XRP': 'XRPUSDT',
-            'LTC': 'LTCUSDT',
-            'BCH': 'BCHUSDT',
-            'UNI': 'UNIUSDT',
-            'VET': 'VETUSDT'
-        }
-        
-        # If it's a simple symbol, convert to USDT pair
-        if symbol in symbol_map:
-            return symbol_map[symbol]
-        
-        # If it doesn't end with USDT, BUSD, etc., assume it needs USDT
-        if not any(symbol.endswith(quote) for quote in ['USDT', 'BUSD', 'USDC']):
-            return f"{symbol}USDT"
-        
-        return symbol
-    
     def get_klines(self, symbol, interval='1h', limit=20):
         """Get candlestick data for perpetual futures"""
         try:
-            symbol = self._format_symbol(symbol)
             url = f"{self.base_url}/fapi/v1/klines"
             params = {
                 'symbol': symbol.upper(),
@@ -83,43 +49,8 @@ class BinanceUSDTPressureScanner:
         })
         self.perpetual_fetcher = BinancePerpetualFetcher()
         
-    def _format_symbol(self, symbol):
-        """Auto-format common symbols to proper trading pairs"""
-        symbol = symbol.upper().strip()
-        
-        # Common symbol mappings
-        symbol_map = {
-            'BTC': 'BTCUSDT',
-            'ETH': 'ETHUSDT', 
-            'BNB': 'BNBUSDT',
-            'ADA': 'ADAUSDT',
-            'SOL': 'SOLUSDT',
-            'DOT': 'DOTUSDT',
-            'MATIC': 'MATICUSDT',
-            'LINK': 'LINKUSDT',
-            'AVAX': 'AVAXUSDT',
-            'ATOM': 'ATOMUSDT',
-            'XRP': 'XRPUSDT',
-            'LTC': 'LTCUSDT',
-            'BCH': 'BCHUSDT',
-            'UNI': 'UNIUSDT',
-            'VET': 'VETUSDT'
-        }
-        
-        # If it's a simple symbol, convert to USDT pair
-        if symbol in symbol_map:
-            return symbol_map[symbol]
-        
-        # If it doesn't end with USDT, BUSD, etc., assume it needs USDT
-        if not any(symbol.endswith(quote) for quote in ['USDT', 'BUSD', 'USDC']):
-            return f"{symbol}USDT"
-        
-        return symbol
-        
     def get_kline_data(self, symbol, interval='1h', limit=20, market_type='spot'):
         """Get kline data for a symbol from spot or perpetual market"""
-        symbol = self._format_symbol(symbol)
-        
         if market_type == 'perpetual':
             return self.perpetual_fetcher.get_klines(symbol, interval, limit)
         
@@ -191,7 +122,7 @@ class BinanceUSDTPressureScanner:
             volume_trend = recent_data['volume'].pct_change().mean() * 100
             
             return {
-                'symbol': self._format_symbol(symbol),
+                'symbol': symbol.upper(),
                 'market_type': market_type,
                 'current_buy_pressure': latest['buy_pressure'],
                 'current_sell_pressure': latest['sell_pressure'],
@@ -362,69 +293,55 @@ class BinanceUSDTPressureScanner:
             return "BUILDING"
 
 
-def get_binance_buy_sell_pressure(symbols, include_both_markets=True, apply_filters=True, top_n=50):
+def Buy_Sell_Pressure(symbols, include_both_markets=True, apply_filters=True, top_n=50):
     """
-    Get buy pressure DataFrame for specified symbols from spot and perpetual markets
+    Scan specific symbols for buy/sell pressure analysis
     
     Args:
         symbols (list): List of trading symbols (e.g., ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'])
-        include_both_markets (bool): If True, includes both spot and perpetual data for each symbol
-                                If False, only includes spot data (default: True)
-        apply_filters (bool): Whether to apply quality filters (default: True)
+        include_both_markets (bool): If True, includes both spot and perpetual data
+        apply_filters (bool): Whether to apply quality filters
         top_n (int): Number of top results to return
     
     Returns:
-        pandas.DataFrame: Buy pressure analysis with columns:
-            - rank: Ranking by buy pressure
-            - symbol: Trading pair symbol
-            - market_type: 'spot' or 'perpetual'
-            - current_buy_pressure: Current buy pressure %
-            - current_sell_pressure: Current sell pressure %
-            - avg_buy_pressure_5periods: Average buy pressure over 5 periods
-            - buy_pressure_trend: Trend in buy pressure
-            - latest_price_change: Latest price change %
-            - latest_volume: Latest volume
-            - volume_trend: Volume trend %
-            - volatility: Price volatility
-            - signal: Trading signal (STRONG_BUY, BUY, WATCH, AVOID)
-            - momentum: Momentum classification (EXPLOSIVE, STRONG, GOOD, BUILDING)
-            - timestamp: Analysis timestamp
-            
-    Example:
-        Input: ['BTCUSDT', 'ETHUSDT']
-        Output: DataFrame with 4 rows (2 spot + 2 perpetual entries)
+        pandas.DataFrame: Buy pressure analysis results
     """
     scanner = BinanceUSDTPressureScanner()
     return scanner.get_dataframe(symbols=symbols, include_both_markets=include_both_markets, 
                                 apply_filters=apply_filters, top_n=top_n)
 
 
+# ============================================================================
+# EXAMPLE USAGE - SCAN SPECIFIC SYMBOLS
+# ============================================================================
 
-# # ============================================================================
-# # 1. BOTH MARKETS (SPOT + PERPETUAL) - DEFAULT BEHAVIOR
-# # ============================================================================
-# print("\n📊 1. BOTH MARKETS ANALYSIS (SPOT + PERPETUAL)")
-# print("-" * 50)
-
-# both_markets_df = get_binance_buy_sell_pressure(
-#     symbols=symbols,
-#     include_both_markets=True,  # Both spot and perpetual
-#     apply_filters=True,
-#     top_n=20
-# )
-
-
-
-# # ============================================================================
-# # 2. SPOT MARKET ONLY
-# # ============================================================================
-# print("\n💰 2. SPOT MARKET ONLY ANALYSIS")
-# print("-" * 50)
-
-# spot_only_df = get_binance_buy_sell_pressure(
-#     symbols=symbols,
-#     include_both_markets=False,  # Spot only
-#     apply_filters=True,
-#     top_n=20
-# )
-
+# if __name__ == "__main__":
+#     # Define your list of symbols to scan
+#     my_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'BNBUSDT', 'DOTUSDT']
+    
+#     print("🔍 Scanning specific symbols...")
+#     print(f"Symbols: {my_symbols}")
+#     print("-" * 60)
+    
+#     # Scan only these specific symbols
+#     results = Buy_Sell_Pressure(
+#         symbols=my_symbols,           # Your custom list of symbols
+#         include_both_markets=True,    # Both spot and perpetual
+#         apply_filters=True,           # Apply quality filters
+#         top_n=20                      # Top 20 results
+#     )
+    
+#     if not results.empty:
+#         print(f"\n📊 Results for {len(my_symbols)} symbols:")
+#         print(results.to_string(index=False))
+        
+#         # Show summary
+#         print(f"\n📈 Summary:")
+#         print(f"Total entries: {len(results)}")
+#         print(f"Strong Buy signals: {len(results[results['signal'] == 'STRONG_BUY'])}")
+#         print(f"Buy signals: {len(results[results['signal'] == 'BUY'])}")
+#         print(f"Watch signals: {len(results[results['signal'] == 'WATCH'])}")
+#         print(f"Avoid signals: {len(results[results['signal'] == 'AVOID'])}")
+        
+#     else:
+#         print("No results found for the specified symbols")

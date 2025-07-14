@@ -9,34 +9,6 @@ class BinancePerpetualFetcher:
     def __init__(self):
         self.base_url = "https://fapi.binance.com"
     
-    def _format_symbol(self, symbol):
-        """Auto-format common symbols to proper trading pairs"""
-        symbol = symbol.upper().strip()
-        
-        # Common symbol mappings
-        symbol_map = {
-            'BTC': 'BTCUSDT',
-            'ETH': 'ETHUSDT', 
-            'BNB': 'BNBUSDT',
-            'ADA': 'ADAUSDT',
-            'SOL': 'SOLUSDT',
-            'DOT': 'DOTUSDT',
-            'MATIC': 'MATICUSDT',
-            'LINK': 'LINKUSDT',
-            'AVAX': 'AVAXUSDT',
-            'ATOM': 'ATOMUSDT'
-        }
-        
-        # If it's a simple symbol, convert to USDT pair
-        if symbol in symbol_map:
-            return symbol_map[symbol]
-        
-        # If it doesn't end with USDT, BUSD, etc., assume it needs USDT
-        if not any(symbol.endswith(quote) for quote in ['USDT', 'BUSD', 'USDC']):
-            return f"{symbol}USDT"
-        
-        return symbol
-    
     def get_exchange_info(self) -> Dict:
         """Get exchange information to validate symbols"""
         try:
@@ -51,7 +23,6 @@ class BinancePerpetualFetcher:
     def get_klines(self, symbol, interval='1h', limit=200):
         """Get candlestick data for perpetual futures"""
         try:
-            symbol = self._format_symbol(symbol)
             url = f"{self.base_url}/fapi/v1/klines"
             params = {
                 'symbol': symbol.upper(),
@@ -85,25 +56,9 @@ class BinancePerpetualFetcher:
             print(f"Error fetching perpetual data for {symbol}: {e}")
             return None
     
-    def get_current_price(self, symbol):
-        """Get current price"""
-        try:
-            symbol = self._format_symbol(symbol)
-            url = f"{self.base_url}/fapi/v1/ticker/price"
-            params = {'symbol': symbol.upper()}
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            
-            data = response.json()
-            return float(data['price'])
-        except requests.RequestException as e:
-            print(f"Error fetching current price for {symbol}: {e}")
-            return 0.0
-    
     def get_24hr_stats(self, symbol):
         """Get 24hr ticker statistics"""
         try:
-            symbol = self._format_symbol(symbol)
             url = f"{self.base_url}/fapi/v1/ticker/24hr"
             params = {'symbol': symbol.upper()}
             response = requests.get(url, params=params)
@@ -114,16 +69,27 @@ class BinancePerpetualFetcher:
             print(f"Error fetching 24hr stats for {symbol}: {e}")
             return {}
     
-    def get_all_24hr_stats(self):
-        """Get 24hr stats for all symbols"""
+    def get_exchange_info(self) -> Dict:
+        """Get exchange information to validate symbols"""
         try:
-            url = f"{self.base_url}/fapi/v1/ticker/24hr"
+            url = f"{self.base_url}/fapi/v1/exchangeInfo"
             response = requests.get(url)
             response.raise_for_status()
             return response.json()
-        except requests.RequestException as e:
-            print(f"Error fetching all 24hr stats: {e}")
-            return []
+        except Exception as e:
+            print(f"Error fetching exchange info: {e}")
+            return {}
+    
+    def get_exchange_info(self) -> Dict:
+        """Get exchange information to validate symbols"""
+        try:
+            url = f"{self.base_url}/fapi/v1/exchangeInfo"
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error fetching exchange info: {e}")
+            return {}
 
 class Binance_Support_Resistance_Perpetual_Scanner:
     def __init__(self):
@@ -142,14 +108,10 @@ class Binance_Support_Resistance_Perpetual_Scanner:
                     symbols.append(symbol_info['symbol'])
         
         return sorted(symbols)
-    
+        
     def get_klines(self, symbol: str, interval: str = "1h", limit: int = 200) -> pd.DataFrame:
         """Get historical kline data using BinancePerpetualFetcher"""
         return self.fetcher.get_klines(symbol, interval, limit)
-    
-    def get_current_price(self, symbol: str) -> float:
-        """Get current price using BinancePerpetualFetcher"""
-        return self.fetcher.get_current_price(symbol)
     
     def get_24hr_stats(self, symbol: str) -> Dict:
         """Get 24hr ticker statistics using BinancePerpetualFetcher"""
@@ -315,15 +277,13 @@ class Binance_Support_Resistance_Perpetual_Scanner:
             'contract_type': 'PERPETUAL'
         }
     
-    def scan_multiple_coins(self, coin_list: List[str], delay: float = 0.1) -> List[Dict]:
-        """Scan multiple perpetual contracts with rate limiting"""
+    def Support_Resistance_P(self, symbol_list: List[str], delay: float = 0.1) -> List[Dict]:
+        """Scan a list of specific symbols"""
         results = []
         
-        for symbol in coin_list:
+        for symbol in symbol_list:
             try:
-                # Auto-format symbol if needed
-                formatted_symbol = self.fetcher._format_symbol(symbol)
-                result = self.scan_coin(formatted_symbol)
+                result = self.scan_coin(symbol.upper())
                 results.append(result)
                 
                 # Rate limiting to avoid API limits
@@ -334,60 +294,6 @@ class Binance_Support_Resistance_Perpetual_Scanner:
                 results.append({'symbol': symbol, 'error': str(e)})
         
         return results
-    
-    def scan_top_volume_coins(self, top_n: int = 50) -> List[Dict]:
-        """Scan top volume perpetual contracts"""
-        # Get all active symbols
-        all_symbols = self.get_active_symbols()
-        
-        # Get 24hr stats for all symbols using BinancePerpetualFetcher
-        try:
-            tickers = self.fetcher.get_all_24hr_stats()
-            
-            # Filter and sort by volume
-            usdt_tickers = [t for t in tickers if t['symbol'].endswith('USDT') and t['symbol'] in all_symbols]
-            sorted_tickers = sorted(usdt_tickers, key=lambda x: float(x['quoteVolume']), reverse=True)
-            
-            # Get top N symbols
-            top_symbols = [t['symbol'] for t in sorted_tickers[:top_n]]
-            
-            return self.scan_multiple_coins(top_symbols)
-            
-        except Exception as e:
-            print(f"Error getting top volume coins: {e}")
-            return []
-    
-    def filter_results(self, results: List[Dict], filter_type: str = "support") -> List[Dict]:
-        """Filter results based on criteria"""
-        filtered = []
-        
-        for result in results:
-            if 'error' in result:
-                continue
-                
-            if filter_type == "support":
-                if result['signal'] in ["SUPPORT", "STRONG_SUPPORT"]:
-                    filtered.append(result)
-            elif filter_type == "resistance":
-                if result['signal'] in ["RESISTANCE", "STRONG_RESISTANCE"]:
-                    filtered.append(result)
-            elif filter_type == "strong_support":
-                if result['signal'] == "STRONG_SUPPORT":
-                    filtered.append(result)
-            elif filter_type == "strong_resistance":
-                if result['signal'] == "STRONG_RESISTANCE":
-                    filtered.append(result)
-            elif filter_type == "all_signals":
-                if result['signal'] != "NEUTRAL":
-                    filtered.append(result)
-            elif filter_type == "high_volume":
-                if result['quote_volume_24h'] > 100000000:  # 100M+ USDT volume
-                    filtered.append(result)
-            elif filter_type == "near_poc":
-                if result['near_poc']:
-                    filtered.append(result)
-        
-        return filtered
     
     def display_results(self, results: List[Dict]):
         """Display results in a formatted table"""
@@ -420,33 +326,23 @@ class Binance_Support_Resistance_Perpetual_Scanner:
             print(f"{result['symbol']:<15} {result['current_price']:<12.6f} {result['signal']:<18} "
                 f"{result['rsi']:<6.2f} {result['change_24h']:<8.2f} {volume_m:<12.1f} {level:<12} {strength:<4}")
 
+Support_Resistance = Binance_Support_Resistance_Perpetual_Scanner()
 
-# # Usage Examples:
+# # Usage Example:
 # if __name__ == "__main__":
-#     scanner = Binance_Support_Resistance_Perpetual_Scanner()
-
 #     print("🚀 Perpetual Support/Resistance Scanner")
 #     print("=" * 50)
 
-#     # Example 1: Scan specific perpetual contracts (supports auto-formatting)
-#     print("\n📊 Scanning specific coins...")
-#     coins = ['BTC', 'ETH', 'ADA', 'SOL', 'DOGE']  # Will auto-convert to BTCUSDT, ETHUSDT, etc.
-#     results = scanner.scan_multiple_coins(coins)
-#     scanner.display_results(results)
-
-#     # Example 2: Scan top 20 volume perpetual contracts
-#     print("\n📈 Scanning top 20 volume perpetual contracts...")
-#     results = scanner.scan_top_volume_coins(20)
-#     filtered_results = scanner.filter_results(results, "all_signals")
-#     scanner.display_results(filtered_results)
-
-#     # Example 3: Get strong support signals only
-#     print("\n💪 Strong support signals:")
-#     strong_support = scanner.filter_results(results, "strong_support")
-#     scanner.display_results(strong_support)
-
-#     # Example 4: Get all active USDT perpetual contracts
-#     print(f"\n📋 Getting all active symbols...")
-#     active_symbols = scanner.get_active_symbols()
-#     print(f"Found {len(active_symbols)} active USDT perpetual contracts")
-#     print(f"First 10: {active_symbols[:10]}")
+#     # Input your symbol list here
+#     symbol_list = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'SOLUSDT', 'DOGEUSDT', 'BNBUSDT']
+    
+#     # Scan the symbols
+#     results = Support_Resistance.Support_Resistance_P(symbol_list)
+    
+#     # Display results
+#     Support_Resistance.display_results(results)
+    
+#     # Get all active symbols
+#     all_symbols = Support_Resistance.get_active_symbols()
+#     print(f"\nTotal active USDT perpetual symbols: {len(all_symbols)}")
+#     print(f"First 10 symbols: {all_symbols[:10]}")
