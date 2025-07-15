@@ -1,0 +1,2 @@
+Date,Time,Trade_ID,Action,Coin,Symbol,Side,Leverage,Entry_Price,Liquidation_Price,Quantity,Notional_USD,Margin_Used,Stop_Loss,Take_Profit,TP_Type,Exit_Price,Exit_Time,PnL_USD,PnL_Percent,Exit_Reason,Trade_Duration_Minutes,Expected_TP_Profit,Monitoring_Status,Liquidation_Safety_Buffer
+2025-07-15,11:00:12,XRPUSDT_1752544812,ENTRY,XRP,XRPUSDT,long,15,2.8814,2.70506372,39.01237992,112.410271501488,7.5,2.8358137079197787,2.9794725841604435,ATR SL/TP (1:2 R:R),2.8324,12:10:15,-1.9116066160800147,-25.488088214400197,STOP_LOSS,70.05,3.826044913003388,COMPLETELY_FIXED_ACTIVE,1.5%
