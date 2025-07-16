@@ -1761,15 +1761,17 @@ class PositionMonitor:
             try:
                 # Clear previous output in Jupyter notebook
                 clear_output(wait=True)
-                
-                # Execute the monitoring code with configurable variables
-                self.trader.start_monitoring_existing_position(
-                    coin=self.coin,
-                    stop_loss_price=self.stop_loss_price,
-                    take_profit_price=self.take_profit_price,
-                    tp_type="Manual Setup",
-                    margin_used=100
-                )
+                if self.coin == None:
+                    print("No coin specified for monitoring.")
+                else:
+                    # Execute the monitoring code with configurable variables
+                    self.trader.start_monitoring_existing_position(
+                        coin=self.coin,
+                        stop_loss_price=self.stop_loss_price,
+                        take_profit_price=self.take_profit_price,
+                        tp_type="Manual Setup",
+                        margin_used=100
+                    )
                 
                 logging.info(f"Position monitoring executed for {self.coin} at {datetime.now()}")
                 
