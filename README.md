@@ -10,7 +10,7 @@ This repository contains an automated trading system designed to operate on **Bi
 The bot integrates a **multi-indicator strategy** to identify and act on trading opportunities, featuring a **high-frequency monitoring system** and **dynamic risk controls** based on market volatility.
 
 <img src="DashBordSample_1.png" alt="Confusion Matrix" width="350" height="350">
-<img src="DashBordSample_2s.png" alt="Confusion Matrix" width="350" height="350">
+<img src="DashBordSample_2.png" alt="Confusion Matrix" width="350" height="350">
 
 ---
 
