@@ -1,97 +1,104 @@
-CrypBot
-A Python-based cryptocurrency futures trading bot with automated technical analysis, risk management, and self-monitoring capabilities.
-Overview
-CrypBot is an automated trading system for Binance Futures that combines multiple technical indicators to identify trading opportunities. It features ATR-based stop-loss/take-profit management, position monitoring, and comprehensive trade execution with safety mechanisms.
-![Dashboard Sample](DashBordSample_1.png)
-Core Features
+CrypBot: Automated Cryptocurrency Futures Trading Bot
+A Python-based trading bot for Binance Futures that uses automated technical analysis and robust risk management to execute trades.
 
-Technical Analysis: Chandelier ZLSMA, Support/Resistance levels, Buy/Sell Pressure Scanner
-Risk Management: ATR-based stop-loss and take-profit with configurable ratios
-Position Monitoring: Self-monitoring system with 0.3s polling interval
-Trade Execution: Automatic order placement with retry logic and position verification
-Safety Mechanisms: 1.5% liquidation safety buffer, reliable price monitoring
+Overview
+CrypBot is an automated trading system designed to operate on Binance USDT perpetual futures contracts. It integrates a multi-indicator strategy to identify and act on trading opportunities, featuring a high-frequency monitoring system and dynamic risk controls based on market volatility.
+
+Trading Strategy
+The bot's strategy is based on identifying potential market reversals or continuations at key price levels, filtered by trend confirmation.
+
+Signal Generation: The system scans a user-defined list of trading pairs (Coin_List.csv) to identify when the price is approaching significant Support or Resistance levels.
+
+Long Signal: A potential long entry is identified when the price nears a key support level.
+
+Short Signal: A potential short entry is identified when the price nears a key resistance level.
+
+Signal Filtration: Every potential signal is filtered through the Chandelier ZLSMA indicator to ensure the trade aligns with the underlying market trend. A trade is only initiated if the trend confirms the direction of the signal.
+
+Execution: Once a signal is confirmed, the bot calculates the position size based on pre-defined risk parameters and executes the trade.
+
+Key Features
+Technical Analysis Engine: Utilizes a combination of Support/Resistance levels, Chandelier ZLSMA (Zero Lag Smoothed Moving Average), and order flow analysis (Buy/Sell Pressure Scanner).
+
+Dynamic Risk Management: Implements ATR (Average True Range) to set dynamic stop-loss and take-profit levels, adapting to current market volatility.
+
+High-Frequency Monitoring: A self-monitoring loop checks open positions at a high frequency (configurable, e.g., 0.3s) to manage exits precisely.
+
+Automated Trade Execution: Handles order placement, verification, and management with built-in retry logic for API calls.
 
 Architecture
+The project is structured into distinct modules for indicators and execution logic.
+
 CrypBot/
 ├── ExecutionHub/
-│   ├── DisplayFuture.py              # Live chart display
-│   └── FutureTradeExecution.py       # Trade execution engine
+│   ├── DisplayFuture.py          # Live chart display
+│   └── FutureTradeExecution.py   # Trade execution engine
 ├── IndicatorsHub/
-│   ├── Buy_Sell_Pressure_Scanner.py  # Order flow analysis
-│   ├── Chandelier_ZLSMA_Filter.py    # Trend filter
-│   ├── Chandelier_ZLSMA.py           # Main indicator
-│   ├── SMC_FGV.py                    # Smart Money Concepts
-│   ├── SMC.py                        # Market structure
-│   ├── Support_Resistance_Future.py  # S/R levels
-│   └── Up_Down_Trend_Scanner.py      # Trend detection
-├── Dashboard.ipynb                   # Monitoring interface
-├── Live_Trade_Future.ipynb          # Main trading notebook
-└── Coin_List.csv                    # Trading pairs configuration
-Key Components
-Signal Generation
+│   ├── Buy_Sell_Pressure_Scanner.py
+│   ├── Chandelier_ZLSMA_Filter.py
+│   ├── Chandelier_ZLSMA.py
+│   ├── SMC_FGV.py
+│   ├── SMC.py
+│   ├── Support_Resistance_Future.py
+│   └── Up_Down_Trend_Scanner.py
+├── Dashboard.ipynb               # Monitoring interface
+├── Live_Trade_Future.ipynb       # Main trading notebook
+└── Coin_List.csv                 # Trading pairs configuration
 
-Scans active symbols from support/resistance levels
-Identifies long signals when near resistance
-Identifies short signals when near support
-Filters signals through Chandelier ZLSMA
+Installation
+Clone the repository:
 
-Trade Parameters
+git clone <repository-url>
+cd CrypBot
 
-Leverage: Configurable (e.g., 10x)
-Position sizing: Risk-based calculation
-Stop-loss: ATR multiplier (e.g., 2.0x)
-Take-profit: Risk-reward ratio (e.g., 1:2)
+Create and activate a virtual environment:
 
-Monitoring System
+python -m venv venv
+source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
 
-Real-time position tracking
-Automatic stop-loss/take-profit execution
-External position closure detection
-Trade exit recording with PnL tracking
+Install the required dependencies:
 
-Trade Flow
-
-Scanner detects support/resistance proximity
-Chandelier ZLSMA confirms trend direction
-Trade executed with calculated position size
-Self-monitoring loop activates (0.3s interval)
-Automatic exit on stop-loss, take-profit, or manual close
-Trade results recorded with duration and PnL
-
-Risk Controls
-
-Liquidation buffer: 8.3% safety distance from liquidation price
-ATR-based stops: Dynamic stop placement based on volatility
-Position verification: Confirms order execution before monitoring
-Error handling: Retries and fallback mechanisms for API calls
-
-Recent Performance
-Based on logs:
-
-MOCAUSDT: -0.96% (4.0 min duration)
-EPTUSDT: -5.01% (17.9 min duration)
-
-Requirements
-See requirements.txt for dependencies. Key libraries:
-
-pandas: Data manipulation
-IndicatorsHub: Custom technical indicators
-ExecutionHub: Trade execution framework
+pip install -r requirements.txt
 
 Configuration
-Trading pairs configured in Coin_List.csv. Adjust parameters in the trading notebook:
+API Credentials: Create a .env file in the root directory and add your Binance API keys:
 
-Leverage levels
-ATR multipliers
-Risk-reward ratios
-Monitoring intervals
+API_KEY="YOUR_API_KEY"
+API_SECRET="YOUR_API_SECRET"
 
-Notes
+The execution scripts must be updated to load these variables.
 
-System operates on Binance Futures USDT perpetual contracts
-Real-time monitoring requires active connection
-All critical fixes applied and verified
-Ultra-fast monitoring at 0.3s intervals
+Trading Pairs: Edit Coin_List.csv to include the USDT perpetual futures symbols you want the bot to trade (e.g., BTCUSDT, ETHUSDT).
+
+Strategy Parameters: Open the Live_Trade_Future.ipynb notebook and adjust the core trading parameters:
+
+Leverage
+
+Risk-Reward Ratio
+
+ATR multiplier for stop-loss
+
+Position sizing rules
+
+Usage
+The primary entry point for live trading is the Jupyter Notebook.
+
+Ensure your virtual environment is activated.
+
+Launch Jupyter Notebook or JupyterLab:
+
+jupyter notebook
+
+Open Live_Trade_Future.ipynb and run the cells sequentially to start the bot.
+
+Risk Controls
+The system has multiple layers of risk management to protect capital.
+
+ATR-Based Stops: Stop-losses are not fixed; they are calculated using an ATR multiplier. This allows them to be wider during high volatility and tighter during low volatility.
+
+Liquidation Prevention: With proper leverage and ATR-based stop-losses, a position should be closed by the stop-loss long before it approaches the liquidation price. The "8.3% safety distance" is a calculated outcome of the stop-loss placement, not a separate mechanism.
+
+Position Verification: The bot confirms that an order has been successfully executed on the exchange before it begins the monitoring process.
 
 Disclaimer
-Trading cryptocurrencies involves substantial risk of loss. This bot is for educational purposes only. Use at your own risk.
+Trading cryptocurrencies involves substantial risk and is not suitable for all investors. This software is provided for educational purposes only. Do not risk money that you cannot afford to lose. The developers assume no liability for any financial losses incurred. Use at your own risk.
