@@ -1,39 +1,46 @@
 🤖 CrypBot: Automated Cryptocurrency Futures Trading Bot
-A Python-based trading bot for Binance Futures that uses automated technical analysis and robust risk management to execute trades.
+A production-ready Python trading bot for Binance Futures that uses automated technical analysis and robust risk management to execute trades.
 
-🚀 Overview
-CrypBot is an automated trading system designed to operate on Binance USDT perpetual futures contracts. It integrates a multi-indicator strategy to identify and act on trading opportunities, featuring a high-frequency monitoring system and dynamic risk controls based on market volatility.
-
-📈 Trading Strategy
-The bot's strategy is based on identifying potential market reversals or continuations at key price levels, filtered by trend confirmation.
-
-Signal Generation: The system scans a user-defined list of trading pairs (Coin_List.csv) to identify when the price is approaching significant Support or Resistance levels.
-
-Long Signal: A potential long entry is identified when the price nears a key support level.
-
-Short Signal: A potential short entry is identified when the price nears a key resistance level.
-
-Signal Filtration: Every potential signal is filtered through the Chandelier ZLSMA indicator to ensure the trade aligns with the underlying market trend. A trade is only initiated if the trend confirms the direction of the signal.
-
-Execution: Once a signal is confirmed, the bot calculates the position size based on pre-defined risk parameters and executes the trade.
+🎯 Project Overview
+This repository contains an automated trading system designed to operate on Binance USDT perpetual futures contracts. The bot integrates a multi-indicator strategy to identify and act on trading opportunities, featuring a high-frequency monitoring system and dynamic risk controls based on market volatility.
 
 ✨ Key Features
-Technical Analysis Engine: Utilizes a combination of Support/Resistance levels, Chandelier ZLSMA (Zero Lag Smoothed Moving Average), and order flow analysis (Buy/Sell Pressure Scanner).
+Multi-Indicator Strategy: Combines Support/Resistance levels with the Chandelier ZLSMA for trend-confirmed entry signals.
 
-Dynamic Risk Management: Implements ATR (Average True Range) to set dynamic stop-loss and take-profit levels, adapting to current market volatility.
+Dynamic Risk Management: Implements ATR (Average True Range) to set adaptive stop-loss and take-profit levels based on market volatility.
 
-High-Frequency Monitoring: A self-monitoring loop checks open positions at a high frequency (configurable, e.g., 0.3s) to manage exits precisely.
+High-Frequency Monitoring: A self-monitoring loop checks open positions at a sub-second interval (configurable) for precise exit management.
 
-Automated Trade Execution: Handles order placement, verification, and management with built-in retry logic for API calls.
+Automated Execution: Handles order placement, verification, and management with built-in retry logic.
 
-🏗️ Architecture
-The project is structured into distinct modules for indicators and execution logic.
+Performance Tracking: Includes a Jupyter Notebook (Dashboard.ipynb) for monitoring trade performance.
 
+🏗️ Trade Flow Architecture
+The bot follows a systematic, event-driven process to execute trades.
+
+graph TD
+    A[Scan Coin_List.csv] --> B{Price near S/R Level?};
+    B -- Yes --> C{Confirm with Chandelier ZLSMA};
+    B -- No --> A;
+    C -- Trend Confirmed --> D[Calculate Position Size & SL/TP];
+    C -- Trend Not Confirmed --> A;
+    D --> E[Execute Trade on Binance];
+    E --> F[Enter High-Frequency Monitoring Loop];
+    F --> G{SL or TP Hit?};
+    G -- Yes --> H[Close Position];
+    G -- No --> F;
+    H --> I[Log Trade Results];
+    I --> A;
+
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style I fill:#9f9,stroke:#333,stroke-width:2px
+
+📁 Repository Structure
 CrypBot/
-├── ExecutionHub/                   # Handles trade execution and management
+├── 📂 ExecutionHub/                   # Handles trade execution and management
 │   ├── DisplayFuture.py          # Renders live chart data
 │   └── FutureTradeExecution.py   # Core trade execution engine
-├── IndicatorsHub/                  # Contains all technical indicators
+├── 📂 IndicatorsHub/                  # Contains all technical indicators
 │   ├── Buy_Sell_Pressure_Scanner.py # Order flow and volume analysis
 │   ├── Chandelier_ZLSMA_Filter.py   # Trend-confirming filter
 │   ├── Chandelier_ZLSMA.py          # Main trend-following indicator
@@ -41,65 +48,90 @@ CrypBot/
 │   ├── SMC.py                       # Smart Money Concepts (Market Structure)
 │   ├── Support_Resistance_Future.py # S/R level detection
 │   └── Up_Down_Trend_Scanner.py     # General trend direction scanner
-├── Dashboard.ipynb                 # Jupyter notebook for monitoring bot performance
+├──  Dashboard.ipynb                 # Jupyter notebook for monitoring bot performance
 ├── Live_Trade_Future.ipynb         # Main notebook to run the live trading bot
 ├── requirements.txt                # Project dependencies
 └── Coin_List.csv                   # User-defined list of trading pairs
 
-🛠️ Installation
-Clone the repository:
-
-git clone <repository-url>
+🚀 Quick Start
+1️⃣ Clone & Setup
+git clone [https://github.com/your-username/CrypBot.git](https://github.com/your-username/CrypBot.git)
 cd CrypBot
-
-Create and activate a virtual environment:
-
-python -m venv venv
-source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-
-Install the required dependencies:
-
+python -m venv venv && source venv/bin/activate  # Linux/Mac
+# python -m venv venv && venv\Scripts\activate    # Windows
 pip install -r requirements.txt
 
-⚙️ Configuration
-API Credentials: Create a .env file in the root directory and add your Binance API keys:
+2️⃣ Configure Environment
+Create a .env file in the root directory and add your Binance API keys:
 
 API_KEY="YOUR_API_KEY"
 API_SECRET="YOUR_API_SECRET"
 
-The execution scripts must be updated to load these variables.
+Also, edit Coin_List.csv to include your desired trading pairs.
 
-Trading Pairs: Edit Coin_List.csv to include the USDT perpetual futures symbols you want the bot to trade (e.g., BTCUSDT, ETHUSDT).
-
-Strategy Parameters: Open the Live_Trade_Future.ipynb notebook and adjust the core trading parameters:
-
-Leverage
-
-Risk-Reward Ratio
-
-ATR multiplier for stop-loss
-
-Position sizing rules
-
-▶️ Usage
-The primary entry point for live trading is the Jupyter Notebook.
-
-Ensure your virtual environment is activated.
-
-Launch Jupyter Notebook or JupyterLab:
+3️⃣ Run the Bot
+The primary entry point is the Live_Trade_Future.ipynb notebook. Launch Jupyter and run the cells sequentially to start the bot.
 
 jupyter notebook
 
-Open Live_Trade_Future.ipynb and run the cells sequentially to start the bot.
+4️⃣ Monitor Performance
+Open and run Dashboard.ipynb to view live and historical trade data.
 
-🛡️ Risk Controls
-The system has multiple layers of risk management to protect capital.
+📊 Performance
+Performance metrics and visualizations can be tracked in Dashboard.ipynb.
 
-ATR-Based Stops: Stop-losses are not fixed; they are calculated using an ATR multiplier. This allows them to be wider during high volatility and tighter during low volatility.
+📝 Recent Trades (Example)
+Pair
 
-Liquidation Prevention: With proper leverage and ATR-based stop-losses, a position should be closed by the stop-loss long before it approaches the liquidation price. The "8.3% safety distance" is a calculated outcome of the stop-loss placement, not a separate mechanism.
+PnL (%)
 
-Position Verification: The bot confirms that an order has been successfully executed on the exchange before it begins the monitoring process.
+Duration (min)
+
+MOCAUSDT
+
+-0.96%
+
+4.0
+
+EPTUSDT
+
+-5.01%
+
+17.9
+
+Equity Curve
+(This is a placeholder image. Your dashboard should generate a similar plot.)
+
+🧩 Troubleshooting
+Issue
+
+Solution
+
+API Connection Error
+
+Verify that your API keys in the .env file are correct and have the appropriate permissions (Futures Trading) enabled on Binance.
+
+Bot not placing trades
+
+Check the bot's logs. It may be that no valid signals are being generated. Widen your Coin_List.csv or check indicator parameters.
+
+Incorrect Position Size
+
+Review the risk parameters in Live_Trade_Future.ipynb. Ensure your account balance is being fetched correctly.
+
+🤝 Contributing
+Fork the repository.
+
+Create your feature branch: git checkout -b feature/NewIndicator
+
+Commit your changes: git commit -m "Add NewIndicator"
+
+Push to the branch: git push origin feature/NewIndicator
+
+Open a Pull Request.
+
+📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ⚖️ Disclaimer
 Trading cryptocurrencies involves substantial risk and is not suitable for all investors. This software is provided for educational purposes only. Do not risk money that you cannot afford to lose. The developers assume no liability for any financial losses incurred. Use at your own risk.
