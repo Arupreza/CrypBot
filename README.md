@@ -55,6 +55,7 @@ graph TD
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style I fill:#9f9,stroke:#333,stroke-width:2px
 
+
 CrypBot/
 ├── 📂 ExecutionHub/                   # Handles trade execution and management
 │   ├── DisplayFuture.py               # Renders live chart data
