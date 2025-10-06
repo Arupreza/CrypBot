@@ -35,25 +35,16 @@ The bot integrates a **multi-indicator strategy** to identify and act on trading
 
 ## 🏗️ Trade Flow Architecture
 
-The bot follows a systematic, event-driven process to execute trades:
+CrypBot follows an event-driven trade cycle:
 
-```mermaid
-graph TD
-    A[Scan Coin_List.csv] --> B{Price near S/R Level?};
-    B -- Yes --> C{Confirm with Chandelier ZLSMA};
-    B -- No --> A;
-    C -- Trend Confirmed --> D[Calculate Position Size & SL/TP];
-    C -- Trend Not Confirmed --> A;
-    D --> E[Execute Trade on Binance];
-    E --> F[Enter High-Frequency Monitoring Loop];
-    F --> G{SL or TP Hit?};
-    G -- Yes --> H[Close Position];
-    G -- No --> F;
-    H --> I[Log Trade Results];
-    I --> A;
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style I fill:#9f9,stroke:#333,stroke-width:2px
+1. **Scan** symbols from `Coin_List.csv`
+2. **Detect** price proximity to support/resistance
+3. **Confirm** direction via Chandelier ZLSMA trend
+4. **Compute** ATR-based SL/TP and position size
+5. **Execute** order on Binance Futures
+6. **Monitor** positions in sub-second intervals
+7. **Close** position on SL/TP hit
+8. **Log** trade results to CSV and dashboard
 
 
 CrypBot/
