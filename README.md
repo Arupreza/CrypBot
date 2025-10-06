@@ -9,6 +9,8 @@ A production-ready Python trading bot for **Binance Futures** that uses automate
 This repository contains an automated trading system designed to operate on **Binance USDT perpetual futures contracts**.  
 The bot integrates a **multi-indicator strategy** to identify and act on trading opportunities, featuring a **high-frequency monitoring system** and **dynamic risk controls** based on market volatility.
 
+<img src="DashBordSample_1.png" alt="Confusion Matrix" width="350" height="350">
+
 ---
 
 ## ✨ Key Features
